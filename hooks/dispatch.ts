@@ -1,7 +1,7 @@
 // Agent routing and execution (PRD 8, decisions D1). All state is per load (one closure), so tests do not share it.
 import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionCompactInput, SessionCompactResult, ToolCallInput } from 'claude-code'
 import {
-  appendCapped, ceilingHit, ceilingText, CODEX_USAGE, dataDirFor, formatBalance, formatStatus, gapOf, NUDGE_ENTER_GAP, NUDGE_TEXT,
+  appendCapped, ceilingHit, ceilingText, CODEX_USAGE, dataDirFor, formatBalance, formatStatus, gapOf, lastDecisions, NUDGE_ENTER_GAP, NUDGE_TEXT,
   nextTight, parseBalanceArgs, pushRecent, USAGE_LINE,
 } from './balance'
 import type { DecisionEntry, RowRun } from './balance'
@@ -276,6 +276,16 @@ function writeLog($: EngineInterface, st: State, entry: DecisionEntry): Promise<
   })
 }
 
+/** Last decisions across sessions, from the log; this session's list when the log cannot be read. */
+async function recentDecisions($: EngineInterface, st: State): Promise<readonly DecisionEntry[]> {
+  try {
+    await st.logQueue(async () => {}) // let pending log writes land first
+    const r = await $.fs.read(`${await dataDir($, st)}/decisions.jsonl`)
+    if (typeof r === 'string') return lastDecisions(r)
+  } catch { /* fall back */ }
+  return st.recent
+}
+
 // ---------- eligibility (PRD 8.1) ----------
 
 async function optedOut($: EngineInterface): Promise<boolean> {
@@ -406,6 +416,8 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   let overlapped = false
   try {
     if (git) before = await gitSnapshot($, c.cwd)
+    // Codex does not create the folder of its -o file; $.fs.write makes missing parents.
+    try { await $.fs.write(c.outFile, '') } catch { /* best effort */ }
     const built = buildCodexArgv({
       cwd: c.cwd, sandbox: c.sandbox, effort: c.effort, ...(st.opts.codexModel ? { model: st.opts.codexModel } : {}),
       outFile: c.outFile, prompt: c.prompt,
@@ -583,7 +595,7 @@ export async function onBalance($: EngineInterface, st: State, args: string): Pr
       now, mode: modeNow(st), modeFromCommand: st.sessionMode !== undefined,
       claude: await claudeReading($, st, now), codex: await codexReading($, st, now),
       codexAvailable: await codexUsable($, st, now), cooldownUntil: st.cooldownUntil,
-      inflight: await listInflight($, now, st.opts.taskTimeoutMs), recent: st.recent,
+      inflight: await listInflight($, now, st.opts.taskTimeoutMs), recent: await recentDecisions($, st),
     }),
   }
 }

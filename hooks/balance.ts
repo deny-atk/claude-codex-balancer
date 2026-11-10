@@ -40,6 +40,19 @@ export function pushRecent(list: DecisionEntry[], e: DecisionEntry, max = RECENT
   if (list.length > max) list.splice(0, list.length - max)
 }
 
+/** The last `max` lines of the log text that parse as decision objects; blank and broken lines are skipped. */
+export function lastDecisions(text: string, max = RECENT_MAX): DecisionEntry[] {
+  const out: DecisionEntry[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    try {
+      const v: unknown = JSON.parse(line)
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) out.push(v as DecisionEntry)
+    } catch { /* skip */ }
+  }
+  return out.slice(-max)
+}
+
 export type BalanceArgs = { kind: 'show' } | { kind: 'set'; mode: Mode } | { kind: 'usage' }
 
 export function parseBalanceArgs(args: string): BalanceArgs {

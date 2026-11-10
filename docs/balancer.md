@@ -135,7 +135,7 @@ Tool row: under an Agent row that ran on Codex, one dim line. While running: `Co
 
 Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becoming unusable (once per session, whether the binary is missing or not logged in at the check before routing, or a launch failed), and a Codex failure that fell back to Claude.
 
-`/balance` prints the mode (and whether `/balance` set it), each provider's score, window use, reset time and runway, whether Codex is available (and any cooldown), tasks in flight, and the last 5 decisions. `/balance auto|claude|codex|off` sets the mode for this session, overriding the option.
+`/balance` prints the mode (and whether `/balance` set it), each provider's score, window use, reset time and runway, whether Codex is available (and any cooldown), tasks in flight, and the last 5 decisions, read from `decisions.jsonl` (so they include earlier sessions, and a Codex run shows once it has ended; blank or unparsable lines are skipped, and this session's own list is used if the file cannot be read). `/balance auto|claude|codex|off` sets the mode for this session, overriding the option.
 
 `/codex <task>` runs the text as a Codex task (`workspace-write`, effort `high`) and prints the report or the failure text. It makes no Claude model call and works while Claude is limited. It makes no routing decision, but it takes a reservation, is logged, and ends with the session. It refuses in mode `off`, in an opted-out project, and when Codex is unavailable.
 
@@ -170,7 +170,7 @@ Routing to Codex is on in every project. A brief sent to Codex goes to OpenAI, a
 
 ## Data folders
 
-- Data folder: `$CLAUDE_CONFIG_DIR/plugins/data/balancer/`, or `$HOME/.claude/plugins/data/balancer/` when that variable is unset. It holds `decisions.jsonl` and `runs/` with, per run, `<agentId>.txt` (the background output file, or the full text of a cut foreground report), `<agentId>.full.txt` (full text of a cut background report) and `<agentId>.last.txt` (Codex's own last-message file).
+- Data folder: `$CLAUDE_CONFIG_DIR/plugins/data/balancer/`, or `$HOME/.claude/plugins/data/balancer/` when that variable is unset. It holds `decisions.jsonl` and `runs/` with, per run, `<agentId>.txt` (the background output file, or the full text of a cut foreground report), `<agentId>.full.txt` (full text of a cut background report) and `<agentId>.last.txt` (Codex's own last-message file; Balancer writes it empty first, because Codex does not create the `runs/` folder).
 - Shared store (the engine's per-plugin JSON file): `reading/claude`, `reading/codex`, `estimate/<agent type>`, `inflight/<id>`. Writes are last-write-wins, one key per item.
 
 ## Developing and checking

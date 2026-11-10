@@ -731,6 +731,36 @@ test('dw12_balance_shows_four_distinct_window_values_under_the_right_provider', 
   expect(ls[x + 2]).toContain('7d 44% used')
 })
 
+test('dw13_balance_shows_decisions_from_earlier_sessions_in_the_log', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  const e = (n: number, agentType: string) => JSON.stringify({ t: NOW - n * 1000, session: 'old', agentType, route: 'claude', reason: 'mode-claude' })
+  w.files.set(`${DATA}/decisions.jsonl`, [e(3, 'Old1'), 'not json', '', e(2, 'Old2'), e(1, 'Old3')].join('\n') + '\n')
+  await startSession($)
+  const { text }: any = await cmd($)
+  const rows = text.split('\n').filter((l: string) => / -> /.test(l)).map((l: string) => l.trim().split(' ')[1])
+  expect(rows).toEqual(['Old1', 'Old2', 'Old3'])
+})
+
+test('dw13_balance_falls_back_to_this_sessions_decisions_when_the_log_is_unreadable', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { failWrites: true })
+  await startSession($)
+  await $.tool.call(agent() as any)
+  expect(w.files.size).toBe(0)
+  const { text }: any = await cmd($)
+  expect(text).toMatch(/Explore -> codex/)
+})
+
+test('dw14_codex_last_message_folder_is_created_before_spawn', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  let seen: string[] | undefined
+  w.during = () => { seen = w.writes.filter(p => p.endsWith('.last.txt')) }
+  await $.tool.call(agent() as any)
+  expect(w.spawns).toHaveLength(1)
+  const argv = w.spawns[0]!.argv
+  const out = argv[argv.indexOf('-o') + 1]
+  expect(seen).toEqual([out])
+})
+
 const SEVEN_TYPES = ['t1', 't2', 't3', 't4', 't5', 't6', 't7']
 test('dw12_balance_lists_exactly_the_last_five_of_seven_unique_decisions', OPTS({ mode: 'claude', eligibleAgentTypes: SEVEN_TYPES.join(',') }), async ($, on) => {
   const w = world(on, CODEX_AHEAD)

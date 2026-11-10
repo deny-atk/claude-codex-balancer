@@ -1,6 +1,6 @@
 // M2 (PRD 10, 9): status entry, toasts, /codex, delegation nudge, plan mode.
 import { test, expect } from 'claude-code/testing'
-import { formatRowLine, formatStatus } from '../hooks/balance'
+import { formatRowLine, formatStatus, lastDecisions } from '../hooks/balance'
 import {
   CODEX_AHEAD, CODEX_IDLE, CODEX_TEXT, CWD, DATA, H, NOW, SID, SECTIONS,
   agent, inflightKeys, logLines, measure, reading, rolloutFor, settleReal, startSession, world,
@@ -13,6 +13,14 @@ const submit = ($: any, extra: Record<string, unknown> = {}) => $.prompt.submit(
 const NUDGE = /second subscription/
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: ['Agent'], outputStyle: null, traits: [] }
 const MSGS = [{ role: 'user', text: 'earlier', toolUses: [] }]
+
+test('dw13_last_decisions_keeps_the_last_valid_lines_and_skips_bad_ones', () => {
+  const l = (n: number) => JSON.stringify({ t: n, agentType: 'a', route: 'claude', reason: 'r' })
+  const text = [l(1), l(2), '{broken', '', '"str"', l(3), l(4)].join('\n') + '\n'
+  expect(lastDecisions(text, 3).map(d => d.t)).toEqual([2, 3, 4])
+  expect(lastDecisions(text, 10).map(d => d.t)).toEqual([1, 2, 3, 4])
+  expect(lastDecisions('', 5)).toEqual([])
+})
 
 // ---------- status entry (PRD 10): pure formatter ----------
 
