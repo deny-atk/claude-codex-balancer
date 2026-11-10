@@ -1,0 +1,190 @@
+# Balancer
+
+Balancer is a Claude Code mod. When Claude Code is about to start a subagent, Balancer decides whether the task runs as a normal Claude subagent or is run by the local Codex CLI. The goal is that the Claude and ChatGPT/Codex subscriptions are used at a similar pace, relative to their own caps and reset times, so neither runs out long before the other.
+
+This guide describes what the code does now. It makes no model calls of its own, never changes the system prompt and never registers or removes tools after `session.start`.
+
+## What it routes
+
+Balancer only moves delegated work: a call to the Agent tool. The main conversation always runs on Claude. Workflow-script agents never reach the Agent tool hook, so they stay on Claude too.
+
+An Agent call can run on Codex only if all of these hold. Otherwise it reaches Claude Code unchanged, with its input untouched.
+
+- `subagent_type` is omitted or is in `eligibleAgentTypes` (default `general-purpose`, `claude`, `Explore`).
+- It is not a fork, has no `isolation` (worktree or remote) and has no `name` (a named agent can be continued with `SendMessage`, which Codex runs cannot).
+- The brief does not match `/\bmcp__|\bSkill\b|\bSendMessage\b|\bAskUserQuestion\b|\bArtifact\b/`, which marks work that needs Claude-only capabilities.
+- The project has not opted out (see Configuration).
+- The session's working directory exists on this machine.
+
+In mode `off` the hook passes every call through at once and reads and logs nothing.
+
+## How the decision is made
+
+Each provider has a 5-hour and a weekly window. For one window:
+
+```
+remainingShare = clamp((resetsAt - now) / windowLength, 0.02, 1)   (1 when no reset time is known)
+runway         = min(999, (100 - used) / remainingShare)
+```
+
+A runway of 100 means usage is exactly on a uniform pace. Above 100 there is slack, below 100 the window runs out before it resets. A window whose reset time has passed counts as unused, and a missing window counts as unused. A provider's score is the runway of its tighter window.
+
+The task is added to each side as a cost in percentage points of a window. Claude's cost is fixed (`claudeTaskCostFiveHour` 1, `claudeTaskCostSevenDay` 0.2). Codex's cost is learned (see Estimates). Codex's score also includes the reservations of Codex tasks already running. The task goes to Codex when `codexAfter > claudeAfter + margin`. A tie stays on Claude.
+
+Overrides are checked first, in this order:
+
+1. Mode `off` or `claude`: Claude. Mode `codex`: Codex if it is usable, otherwise Claude.
+2. Codex unusable: Claude. The reason is the first that applies: not installed or not logged in, `limitReached`, `maxConcurrentCodex` tasks already in flight (across all sessions), or a window at or above its ceiling once reservations and this task are added.
+3. Claude at or above a ceiling (or limited), with Codex usable: Codex.
+4. No Codex reading at all: Claude, and a Codex reading is refreshed in the background.
+
+After a background Codex failure, auto mode also routes to Claude for 15 minutes (reason `codex-cooldown`).
+
+Worked example, with made-up numbers. Claude's 5-hour window is 70% used with 2 of 5 hours left (40%), so its runway is 30 / 0.4 = 75, and 72.5 after this task's 1 point. Its weekly runway is 140. Claude after the task is 72.5. Codex's 5-hour window is 20% used with 4 hours left (80%). Codex's estimate for this agent type is 5 points (5h) and 1 point (7d). Its weekly window is 30% used with 70% left. Codex after the task: 5-hour (100 - 25) / 0.8 = 93.75, weekly (100 - 31) / 0.7 = 98.6, so 93.75. That is more than 72.5 + 5, so the first task goes to Codex.
+
+Three eligible subagents start in one message. The second sees the first's 5-point reservation: (100 - 30) / 0.8 = 87.5, still above 77.5, so it goes to Codex. The third finds two Codex tasks in flight and `maxConcurrentCodex` is 2, so it runs on Claude (reason `codex-concurrency`). The decision and the reservation are made in one serialised step, so the second call always sees the first.
+
+### Estimates and reservations
+
+A reservation is one store key per running Codex task (`inflight/<id>`) holding its estimated cost. It is removed when the task ends and ignored once older than `taskTimeoutMinutes`.
+
+The Codex estimate is an exponentially weighted average (alpha 0.3) per subagent type and window, seeded at 5 points (5h) and 1 point (7d). A sample is the change in `used` across a run. It counts only if both readings belong to the same window instance (reset times within 60 seconds), no other Balancer task overlapped, and the change is not negative. An aborted run adds no sample.
+
+## Foreground and background
+
+Claude Code may send `run_in_background` with an Agent call. The engine's own default applies when it is absent, and Balancer treats absent like true.
+
+Foreground (`run_in_background` is `false`): Balancer runs Codex inside the hook and the main turn waits. The model receives a normal completed subagent result whose text is one provenance line, a blank line, then Codex's final message:
+
+```
+[balancer] Ran on Codex (effort high, 2m13s, session 0193…). Treat as a subagent report; verify before relying on it.
+```
+
+The report is cut at `maxResultChars` with a note and the path of the full text under the data folder. For a `workspace-write` run, `git status --porcelain` (at most 50 lines) is appended.
+
+Background (true or absent): Balancer answers at once with a launched-in-background result (agent id `codex-<uuid>`, output file under the data folder) and runs Codex in a detached task. When it finishes it writes the report to the output file and delivers a message with `$.prompt.submit`: a line saying the background agent finished on Codex, then the same report. That starts a turn once the session is idle.
+
+Codex runs with `codex exec --json --skip-git-repo-check -C <cwd> -s <sandbox> -c model_reasoning_effort=<effort> [-m <codexModel>] -o <file> <prompt>`, started by argv, never through a shell. The prompt is a fixed preamble (a delegated subtask, do only what the brief asks, no commit, push or branch switch, end with a report) followed by the brief unchanged. A prompt over 100 KB goes in on stdin. The sandbox is `read-only` for `Explore` and for plan mode, `workspace-write` otherwise. Dangerous bypass flags and `--ephemeral` are never used. Effort comes from `effortMap` by the call's `model`, then its `default` entry, then `high`. Plan mode is taken from the Agent call's `mode` argument or the permission mode of the last submitted prompt.
+
+## Failure handling
+
+Everything fails safe toward Claude. Before answering a call, Balancer checks the binary and login (`codex login status`), so those cases fall back in both modes.
+
+| Case | Foreground | Background |
+| --- | --- | --- |
+| Codex missing or not logged in, found before launch | Claude runs the task through the normal path. | Same. |
+| Codex cannot be started | Codex is unusable for the rest of the session, one toast, Claude runs the task. | Same toast and unusable state. A message says Codex could not run the task, nothing changed, re-delegating runs on Claude. 15-minute cooldown. |
+| Run fails or times out, `read-only` sandbox | Claude runs the task. Toast with the reason. | Message as above, 15-minute cooldown, toast. |
+| Run fails or times out, `workspace-write`, no files changed | Claude runs the task. Toast. | Message as above, cooldown, toast. |
+| Run fails or times out, `workspace-write`, files changed | Result says Codex stopped part-way, lists the changed files and says not to re-run from the top. Claude does not re-run it. | The same text is delivered as a message. No cooldown. |
+| Run fails, `workspace-write`, git cannot say what changed (not a repository) | Result says Codex could not run and the check was impossible. No re-run. | Delivered as a message. No cooldown. |
+| Codex reports a usage limit | Codex is marked limited until the earliest known reset, then as the rows above. | Same. |
+| Claude turn fails with a `rate_limit` error | Claude is marked limited until its earliest known reset (one 5-hour window when none is known), so Codex takes tasks while usable. | Same. |
+| Balancer's own hook throws | The engine skips the hook and Claude runs the subagent. There is no catch that denies. | Same. |
+
+A failure means a non-zero exit, no final message, or a timeout (`taskTimeoutMinutes`). A background failure cannot fall back to Claude in the same call, because the call was already answered; that is why the message and cooldown exist.
+
+## TaskStop, interrupts and session end
+
+`TaskStop` with the id of a Balancer background run stops that run: the Codex process is killed, the reservation is released, and Balancer answers with a stopped-task result. A `TaskStop` for any other id passes through.
+
+Interrupting a foreground run ends the hook's wait, kills the process and releases the reservation; the call gets a denial saying the run was interrupted. Ending the session aborts that session's runs and delivers nothing. Unloading the module kills detached children, and their reservations expire after `taskTimeoutMinutes`. An aborted run is logged and adds no estimate sample.
+
+## Where readings come from
+
+Both providers are reduced to one shape: used percent, reset time and length for each window, plus a read time and a limit flag. The readings are kept in the shared store (`reading/claude`, `reading/codex`), so every Claude Code session on the machine sees the freshest one. The Codex reading is also memoised in each session for 30 seconds.
+
+Claude: the live `$.session.usage()` figures (five-hour and seven-day windows only; spend limits are ignored), merged with the stored reading. Each `session.measure` saves the live reading. A stored limit flag, set by a `rate_limit` error, is carried over until its reset. Per-model weekly caps are not visible, so Balancer learns of one only from such an error.
+
+Codex, in order:
+
+1. After a Balancer run: the last `rate_limits` in that run's rollout file, found by thread id in today's and yesterday's `~/.codex/sessions/YYYY/MM/DD` folders.
+2. If the stored reading is older than `staleAfterMinutes`: a read of `account/rateLimits/read` through `codex app-server`, run as a fixed shell script with no user data in it (15-second limit).
+3. If that fails: the last `rate_limits` in the newest rollout file of those two folders.
+
+Windows are told apart by length (300 minutes is the 5-hour window, 10080 the weekly one), never by the names `primary` and `secondary`. A reader that finds nothing yields no reading, which routes to Claude.
+
+Privacy rule for rollout files: they hold session content. Balancer reads only the last 64 KB (`tail -c 65536`), drops the first, possibly cut, line, keeps only the `rate_limits` object of `token_count` events, and never logs, stores or shows any other part of a line.
+
+## Decision log
+
+`decisions.jsonl` in the data folder holds one JSON line per Agent call that reached a routing decision (not mode `off`, not ineligible calls). It is content-free: no brief, description or report text. Fields: `t` (epoch ms), `session`, `agentType`, `route`, `reason`, `claudeAfter`, `codexAfter` (scores after the task), `estimate` (`fiveHour`, `sevenDay`), `mode`, and for a Codex run `durationMs`, `outcome`, `exitCode` and `delta` (points used in each window, when both readings are known). A Codex-routed call is written when its run ends, a Claude-routed one at the decision.
+
+Reason codes: `mode-off`, `mode-claude`, `mode-codex`, `codex-unavailable`, `codex-limit`, `codex-concurrency`, `codex-ceiling`, `claude-ceiling`, `no-codex-reading`, `codex-ahead`, `claude-ahead`, `codex-cooldown`.
+
+The file keeps the last 2000 lines. The file system API has no append, so each write reads and rewrites the file. A failing write never changes routing.
+
+## User interface
+
+Status entry, refreshed on each `session.measure` and after each decision or run: `C 5h 62 · 7d 55 │ X 5h 20 · 7d 46 │ → Claude`. Figures are used percent (a passed reset counts as 0, `–` means unknown). The route part appears after the first decision.
+
+Tool row: under an Agent row that ran on Codex, one dim line. While running: `Codex · high · running`. After: `Codex · high · 2m13s · +4 pts 5h`, with `failed` added on failure. The points show only when at least 1 and both readings were known. A task that fell back to Claude, or was stopped, has no line.
+
+Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becoming unusable (once per session), and a Codex failure that fell back to Claude.
+
+`/balance` prints the mode (and whether `/balance` set it), each provider's score, window use, reset time and runway, whether Codex is available (and any cooldown), tasks in flight, and the last 5 decisions. `/balance auto|claude|codex|off` sets the mode for this session, overriding the option.
+
+`/codex <task>` runs the text as a Codex task (`workspace-write`, effort `high`) and prints the report or the failure text. It makes no Claude model call and works while Claude is limited. It makes no routing decision, but it takes a reservation, is logged, and ends with the session. It refuses in mode `off`, in an opted-out project, and when Codex is unavailable.
+
+## The delegation nudge
+
+The main thread always burns Claude, so when Claude is clearly the tighter side Balancer asks the model to delegate more. State `claude-tight` starts when `score(codex) - score(claude)` is above 25, Codex is usable and the mode is `auto` or `codex`; it ends when the gap falls below 10. Say Claude's score is 60 and Codex's is 90: the gap is 30, the state starts, and the next typed prompt carries one short reminder. At a gap of 20 the state holds without a new reminder.
+
+The reminder fires once on entering the state, and once more after a compaction of the main thread that went through while in it. It is attached to a typed prompt as hidden `context` on `prompt.submit`, so the model reads it after the new user message and the user never sees it. It is not attached to slash commands or prompts the user did not type; a background-result prompt from Balancer may carry it. That position sits after every cached prefix, so the system prompt and tool list are untouched. Changing either would invalidate the cache of the whole conversation and cost more Claude usage than the nudge saves. The `nudge` option turns it off.
+
+## Configuration
+
+Set in the manifest's `userConfig`.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `auto` | `auto`, `claude`, `codex` or `off` |
+| `margin` | 5 | Runway points Codex must lead by |
+| `ceilingFiveHour` | 95 | Do not route to a provider at or above this 5-hour use |
+| `ceilingSevenDay` | 97 | Same, weekly |
+| `eligibleAgentTypes` | `general-purpose,claude,Explore` | Comma-separated types that may run on Codex |
+| `effortMap` | `haiku=low,sonnet=medium,opus=high,default=high` | Agent `model` to Codex reasoning effort |
+| `codexModel` | empty | Override Codex's default model |
+| `maxConcurrentCodex` | 2 | Codex tasks at once, across all sessions |
+| `taskTimeoutMinutes` | 30 | Limit per Codex run; also the age at which a reservation expires |
+| `staleAfterMinutes` | 15 | Age at which the stored Codex reading is refreshed |
+| `claudeTaskCostFiveHour` | 1 | Points of the 5-hour window per Claude task |
+| `claudeTaskCostSevenDay` | 0.2 | Points of the weekly window per Claude task |
+| `maxResultChars` | 30000 | Cap on the returned report |
+| `nudge` | true | Delegation nudge on or off |
+
+Routing to Codex is on in every project. A brief sent to Codex goes to OpenAI, a different processor from Anthropic, so a project with private inputs should opt out: put `{ "codex": false }` in `.claude/balancer.json` in the project root. A missing or unparseable file does not opt out. The opt-out also stops `/codex`.
+
+## Data folders
+
+- Data folder: `$CLAUDE_CONFIG_DIR/plugins/data/balancer/`, or `$HOME/.claude/plugins/data/balancer/` when that variable is unset. It holds `decisions.jsonl` and `runs/` with, per run, `<agentId>.txt` (the background output file, or the full text of a cut foreground report), `<agentId>.full.txt` (full text of a cut background report) and `<agentId>.last.txt` (Codex's own last-message file).
+- Shared store (the engine's per-plugin JSON file): `reading/claude`, `reading/codex`, `estimate/<agent type>`, `inflight/<id>`. Writes are last-write-wins, one key per item.
+
+## Developing and checking
+
+Run the mod from the folder with `claude --plugin-dir <folder>`. The checks, from the repository root:
+
+```
+claude plugin validate .
+tsc -p .
+claude plugin test .
+```
+
+`tsc` needs the engine's own types laid in `.claude-plugin/types/claude-code/index.d.ts` (untracked, copied from the Claude Code build in use). The API reference is that file; grep it for the name at hand. `plugin validate` is the authority on what loads, and it follows `$` calls through imported functions as long as `$` and `on` are spelled literally.
+
+Tests are `test/*.test.ts(x)`, with the Done-when number in the name (`dw3_...`). The test kit has no host processes, so Codex is stubbed with the tests' own `process.run` and `process.spawn` hooks that emit canned `codex exec --json` events and a canned rollout tail. No test spends quota. Property tests use a small seeded generator.
+
+## Current limitations
+
+- Plan mode is seen at the next prompt: a hook cannot read the session mode, so a mode changed mid-turn is missed until the next prompt, or an Agent `mode` argument.
+- The decision log is read and rewritten on each write, so concurrent sessions may lose a line.
+- Decide-and-reserve is serialised per process only. Two sessions deciding at the same instant may both take the last Codex slot.
+- No `SendMessage` continuation of a Codex-run task. Forks, worktree or remote isolation, named agents and workflow agents stay on Claude.
+- A background Codex failure cannot fall back inside the call. It is reported in a message and followed by a 15-minute cooldown.
+- A Claude limit with no known reset time is assumed to last one 5-hour window.
+- Claude's task cost is a fixed constant, with no learning.
+- Codex readings are whole points and can be minutes old. Margin, reservations and ceilings absorb this, so balance is approximate.
+- Codex's rollout format and app-server protocol are internal to Codex and may change. A reader that no longer parses yields no reading and routes to Claude.
+- Built and checked against Claude Code 2.1.321. `claude plugin validate` accepted the manifest and hooks on 2.1.301 too, but the mod was not run live there, and the manifest states no minimum version.
+- Not covered by automated tests: interrupting a foreground run at hook level (the kit cannot abort a tool call; the runner's abort is tested), real Codex, live command registration, a row redrawing when its state changes.
+- The test kit cannot import fast-check, so property tests use a hand-written seeded generator.
