@@ -97,6 +97,28 @@ for (const [name, over] of INELIGIBLE) {
   })
 }
 
+// Every alternative of CAPABILITY_RE reaches the bottom Agent hook; words that merely contain one do not.
+const CAPS = ['mcp__x__y', 'Skill', 'SendMessage', 'AskUserQuestion', 'Artifact']
+for (const word of CAPS) {
+  test(`dw4_capability_alternative_${word}`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    const input = agent({ prompt: `please use ${word} here` })
+    const r: any = await $.tool.call(input as any)
+    expect(r.result).toEqual(CLAUDE_MARK)
+    expect(w.agentCalls).toHaveLength(1)
+    same(w.agentCalls[0], input)
+    expect(w.spawns).toHaveLength(0)
+  })
+}
+
+test('dw4_capability_words_inside_other_words_do_not_match', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  const r: any = await $.tool.call(agent({ prompt: 'ArtifactX Skills xmcp__y mySendMessage AskUserQuestions' }) as any)
+  expect(r.result.status).toBe('completed')
+  expect(w.agentCalls).toHaveLength(0)
+  expect(w.spawns).toHaveLength(1)
+})
+
 test('dw4_omitted_type_is_eligible', async ($, on) => {
   const w = world(on, CODEX_AHEAD)
   const { subagent_type: _t, ...input } = agent()
@@ -125,6 +147,18 @@ test('dw4_missing_cwd', async ($, on) => {
 })
 
 // ---------- dw5: failure rows ----------
+
+test('dw5_hook_throws_claude_runs', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  // the harness's session.usage stub reads w.usage, so a throwing getter makes that op throw
+  Object.defineProperty(w, 'usage', { get() { throw new Error('usage broke') } })
+  const input = agent()
+  const r: any = await $.tool.call(input as any)
+  expect(r.result).toEqual(CLAUDE_MARK)
+  expect(w.agentCalls).toHaveLength(1)
+  same(w.agentCalls[0], input)
+  expect(w.spawns).toHaveLength(0)
+})
 
 test('dw5_codex_missing_falls_back_and_toasts_once', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { script: 'missing' })
@@ -415,6 +449,16 @@ test('dw12_balance_shows_windows_scores_mode_tasks_and_last_decisions', async ($
   expect(text).toMatch(/general-purpose -> /)
   expect(text).toContain('Codex: available')
   expect(w.loginChecks).toBeGreaterThan(0)
+})
+
+test('dw12_balance_shows_last_five', async ($, on) => {
+  world(on, CODEX_AHEAD)
+  await startSession($)
+  const types = ['Explore', 'general-purpose']
+  for (let i = 0; i < 7; i++) await $.tool.call(agent({ subagent_type: types[i % 2] }) as any)
+  const { text }: any = await cmd($)
+  const rows = text.split('\n').filter((l: string) => / -> /.test(l)).map((l: string) => l.trim().split(' ')[1])
+  expect(rows).toEqual(['Explore', 'general-purpose', 'Explore', 'general-purpose', 'Explore'])
 })
 
 test('dw12_balance_with_a_mode_sets_it_and_a_bad_argument_prints_usage', async ($, on) => {
