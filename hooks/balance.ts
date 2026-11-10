@@ -1,7 +1,8 @@
 // Decision log and /balance text. Pure functions: no engine calls, so the engine-call scan has nothing to trace here.
 import type { Inflight } from './readings'
+import { formatDuration } from './codex'
 import { effectiveWindow, runway, score, FIVE_HOUR_MS, SEVEN_DAY_MS } from './policy'
-import type { Cost, Mode, ProviderReading, ReasonCode, WindowReading } from './policy'
+import type { Cost, Mode, PolicyConfig, ProviderReading, ReasonCode, WindowReading } from './policy'
 
 export const LOG_MAX_LINES = 2000
 export const RECENT_MAX = 5
@@ -101,3 +102,70 @@ export function formatBalance(i: {
   }
   return out.join('\n')
 }
+
+// ---------- status entry and tool-row line (PRD 10) ----------
+
+function usedText(w: WindowReading | null, lengthMs: number, now: number): string {
+  return w === null ? '–' : String(Math.round(effectiveWindow(w, lengthMs, now).used))
+}
+
+const providerStatus = (tag: string, r: ProviderReading | null, now: number) =>
+  `${tag} 5h ${usedText(r?.fiveHour ?? null, FIVE_HOUR_MS, now)} · 7d ${usedText(r?.sevenDay ?? null, SEVEN_DAY_MS, now)}`
+
+/** `C 5h 62 · 7d 55 │ X 5h 20 · 7d 46 │ → Claude`: effective used %, `–` when unknown; the route only after a decision. */
+export function formatStatus(i: {
+  now: number; claude: ProviderReading | null; codex: ProviderReading | null; last: 'claude' | 'codex' | undefined
+}): string {
+  const parts = [providerStatus('C', i.claude, i.now), providerStatus('X', i.codex, i.now)]
+  if (i.last) parts.push(`→ ${i.last === 'codex' ? 'Codex' : 'Claude'}`)
+  return parts.join(' │ ')
+}
+
+/** What the mod keeps per Codex run, keyed by tool_use_id, so the row can draw (the `$.state` value of types/index.d.ts). */
+export type RowRun = { effort: string; running: boolean; durationMs?: number; delta5h?: number; failed?: boolean }
+
+export function formatRowLine(r: RowRun): string {
+  const parts = ['Codex', r.effort]
+  if (r.running) parts.push('running')
+  else {
+    parts.push(formatDuration(r.durationMs ?? 0))
+    if (r.delta5h !== undefined && Math.round(r.delta5h) >= 1) parts.push(`+${Math.round(r.delta5h)} pts 5h`)
+    if (r.failed) parts.push('failed')
+  }
+  return parts.join(' · ')
+}
+
+// ---------- ceilings (toasts) ----------
+
+/** Which window of a reading is at or above its ceiling, or null. The 5-hour window is named first. */
+export function ceilingHit(r: ProviderReading | null, now: number, c: Pick<PolicyConfig, 'ceilingFiveHour' | 'ceilingSevenDay'>):
+  { window: '5h' | '7d'; used: number; ceiling: number } | null {
+  if (!r) return null
+  const five = effectiveWindow(r.fiveHour, FIVE_HOUR_MS, now).used
+  if (five >= c.ceilingFiveHour) return { window: '5h', used: five, ceiling: c.ceilingFiveHour }
+  const seven = effectiveWindow(r.sevenDay, SEVEN_DAY_MS, now).used
+  if (seven >= c.ceilingSevenDay) return { window: '7d', used: seven, ceiling: c.ceilingSevenDay }
+  return null
+}
+
+export const ceilingText = (name: string, h: { window: string; used: number; ceiling: number }) =>
+  `Balancer: ${name} is at its ${h.window} ceiling (${Math.round(h.used)}% used, ceiling ${h.ceiling}%).`
+
+// ---------- delegation nudge (PRD 9) ----------
+
+export const NUDGE_ENTER_GAP = 25
+export const NUDGE_LEAVE_GAP = 10
+
+export const NUDGE_TEXT =
+  'Balancer: delegated general-purpose and Explore subagents currently run on a second subscription with more room than this one. ' +
+  'Prefer delegating self-contained searches, mechanical edits and check runs, and write each brief so it stands alone.'
+
+/** Hysteresis: enter above 25, leave below 10, hold in between. `gap` is score(codex) - score(claude), no task costs. */
+export function nextTight(tight: boolean, gap: number, codexUsable: boolean): boolean {
+  if (!codexUsable) return false
+  return tight ? !(gap < NUDGE_LEAVE_GAP) : gap > NUDGE_ENTER_GAP
+}
+
+export const gapOf = (claude: ProviderReading | null, codex: ProviderReading | null, now: number) => score(codex, now) - score(claude, now)
+
+export const CODEX_USAGE = 'Usage: /codex <task>'

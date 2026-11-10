@@ -1,9 +1,10 @@
 // Agent routing and execution (PRD 8, decisions D1). All state is per load (one closure), so tests do not share it.
-import type { EngineInterface, Next, PluginOptions, ToolCallInput } from 'claude-code'
+import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionCompactInput, SessionCompactResult, ToolCallInput } from 'claude-code'
 import {
-  appendCapped, dataDirFor, formatBalance, parseBalanceArgs, pushRecent, USAGE_LINE,
+  appendCapped, ceilingHit, ceilingText, CODEX_USAGE, dataDirFor, formatBalance, formatStatus, gapOf, NUDGE_ENTER_GAP, NUDGE_TEXT,
+  nextTight, parseBalanceArgs, pushRecent, USAGE_LINE,
 } from './balance'
-import type { DecisionEntry } from './balance'
+import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
   effortFor, gitSnapshot, newAgentId, parseEffortMap, runCodex, sandboxFor, taskStopRecord,
@@ -26,6 +27,7 @@ const RECHECK_UNAVAILABLE_MS = 10 * MIN_MS
 const CAPABILITY_RE = /\bmcp__|\bSkill\b|\bSendMessage\b|\bAskUserQuestion\b|\bArtifact\b/
 
 export type Opts = ReturnType<typeof readOptions>
+type Provider = 'claude' | 'codex'
 
 const num = (o: PluginOptions, k: string, d: number) => (typeof o[k] === 'number' ? (o[k] as number) : d)
 const str = (o: PluginOptions, k: string, d: string) => (typeof o[k] === 'string' ? (o[k] as string) : d)
@@ -47,6 +49,7 @@ export function readOptions(o: PluginOptions) {
     staleAfterMs: num(o, 'staleAfterMinutes', 15) * MIN_MS,
     claudeCost: { fiveHour: num(o, 'claudeTaskCostFiveHour', 1), sevenDay: num(o, 'claudeTaskCostSevenDay', 0.2) } as Cost,
     maxResultChars: num(o, 'maxResultChars', 30000),
+    nudge: o.nudge !== false,
   }
 }
 
@@ -83,6 +86,7 @@ function deltaOf(b: ProviderReading | null, a: ProviderReading | null): Cost | u
 
 type Task = {
   agentId: string; sessionId: string; type: string; description: string; prompt: string
+  rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
   cwd: string; sandbox: Sandbox; effort: string; outFile: string
   estimate: Cost; codexBefore: ProviderReading | null; overlappedStart: boolean
   entry: DecisionEntry
@@ -114,6 +118,11 @@ export function createState(options: PluginOptions) {
     cooldownUntil: 0,
     broken: false, // spawn failed: Codex is unusable for the rest of the session
     toasted: false,
+    permissionMode: undefined as string | undefined, // from the last UserPromptSubmit
+    lastRoute: undefined as Provider | undefined,
+    atCeiling: { claude: false, codex: false } as Record<Provider, boolean>,
+    tight: false, // PRD 9 state claude-tight
+    armed: false, // one reminder waits for the next prompt
     avail: undefined as { ok: boolean; at: number } | undefined,
     refreshing: false,
     dir: undefined as string | undefined,
@@ -171,6 +180,52 @@ async function refreshCodex($: EngineInterface, st: State): Promise<void> {
   }
 }
 
+// ---------- status, ceilings, nudge (PRD 10, 9) ----------
+
+// The reading the mod already holds: no process is run. A stale one still reads right (its passed resets count as zero).
+async function codexKnown($: EngineInterface, st: State, now: number): Promise<ProviderReading | null> {
+  const r = st.cache.get('codex', now) ?? (await loadReading($, 'codex'))
+  return r ? expireLimit(r, now) : null
+}
+
+// UI is best effort: a failing status line or toast never changes routing.
+async function quietly(fn: () => unknown): Promise<void> {
+  try { await fn() } catch { /* nothing to do */ }
+}
+
+/** Status line, ceiling toasts and the nudge state, from the readings as they stand. `claudeIn` is the one a measure just took. */
+async function observe($: EngineInterface, st: State, claudeIn?: ProviderReading | null): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const claude = claudeIn !== undefined ? claudeIn : await claudeReading($, st, now)
+    const codex = await codexKnown($, st, now)
+    await quietly(() => $.ui.status(formatStatus({ now, claude, codex, last: st.lastRoute })))
+    for (const [p, r] of [['claude', claude], ['codex', codex]] as const) {
+      const hit = ceilingHit(r, now, st.opts.config)
+      if (hit && !st.atCeiling[p]) await quietly(() => $.ui.toast(ceilingText(p === 'claude' ? 'Claude' : 'Codex', hit)))
+      st.atCeiling[p] = hit !== null
+    }
+    if (st.opts.nudge) {
+      const m = modeNow(st)
+      const gap = claude && codex ? gapOf(claude, codex, now) : 0
+      // Ask whether Codex is usable only when it could change the state: a process check is not free.
+      const wanted = codex !== null && m !== 'off' && m !== 'claude' && (st.tight || gap > NUDGE_ENTER_GAP)
+      const tight = nextTight(st.tight, gap, wanted && (await codexUsable($, st, now)))
+      if (tight && !st.tight) st.armed = true
+      if (!tight) st.armed = false
+      st.tight = tight
+    }
+  } catch {
+    // an unreadable reading changes nothing
+  }
+}
+
+// One value per run, for the row (types/index.d.ts). Written after the row's tool.call began, so a redraw follows.
+async function setRun($: EngineInterface, id: string | undefined, v: RowRun | null): Promise<void> {
+  if (id === undefined) return
+  await quietly(() => $.state.set({ plugin: 'balancer', key: 'runs', id }, v))
+}
+
 // ---------- decision log ----------
 
 function writeLog($: EngineInterface, st: State, entry: DecisionEntry): Promise<void> {
@@ -194,17 +249,21 @@ function writeLog($: EngineInterface, st: State, entry: DecisionEntry): Promise<
 
 // ---------- eligibility (PRD 8.1) ----------
 
+async function optedOut($: EngineInterface): Promise<boolean> {
+  try {
+    const root = await $.session.root()
+    const text = await $.fs.read(`${root}/.claude/balancer.json`)
+    return typeof text === 'string' && (JSON.parse(text) as { codex?: unknown } | null)?.codex === false
+  } catch {
+    return false // missing or unparseable: not opted out
+  }
+}
+
 async function eligible($: EngineInterface, st: State, e: AgentCall): Promise<boolean> {
   const type = e.subagent_type
   if (type !== undefined && !st.opts.eligible.has(type)) return false
   if (type === 'fork' || e.isolation != null || e.name != null || CAPABILITY_RE.test(e.prompt)) return false
-  try {
-    const root = await $.session.root()
-    const text = await $.fs.read(`${root}/.claude/balancer.json`)
-    if (typeof text === 'string' && (JSON.parse(text) as { codex?: unknown } | null)?.codex === false) return false
-  } catch {
-    // missing or unparseable: not opted out
-  }
+  if (await optedOut($)) return false
   try {
     await $.fs.stat(await $.session.cwd())
   } catch {
@@ -224,7 +283,8 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const sessionId = await $.session.id()
   const cwd = await $.session.cwd() // before the reservation: nothing after it may throw before the run owns it
   const dd = await dataDir($, st)
-  const planMode = (e as { mode?: string }).mode === 'plan' // the hook cannot read the session's mode: only the Agent argument
+  // The hook cannot read the session's mode directly: the Agent argument, or the mode the last prompt was submitted in.
+  const planMode = (e as { mode?: string }).mode === 'plan' || st.permissionMode === 'plan'
 
   // Decide and reserve in one step: a second call starting now must see this call's reservation.
   const picked = await st.exclusive(async () => {
@@ -259,19 +319,24 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   })
 
   pushRecent(st.recent, picked.entry)
+  st.lastRoute = picked.d.route
   if (picked.d.refresh) void refreshCodex($, st)
   if (picked.d.route === 'claude' || !picked.agentId) {
     await writeLog($, st, picked.entry)
+    await observe($, st)
     return next(e)
   }
 
   const agentId = picked.agentId
   const sandbox = sandboxFor(e.subagent_type, planMode)
   const task: Task = {
-    agentId, sessionId, type, description: e.description, prompt: e.prompt,
+    agentId, sessionId, type, description: e.description, prompt: e.prompt, rowId: e.tool_use_id,
     cwd, sandbox, effort: effortFor(e.model, st.opts.effortMap), outFile: `${dd}/runs/${agentId}.last.txt`,
     estimate: picked.estimate, codexBefore: picked.codex, overlappedStart: picked.overlapped, entry: picked.entry,
   }
+
+  await setRun($, task.rowId, { effort: task.effort, running: true })
+  await observe($, st)
 
   // The 2.1.321 input type omits run_in_background; the model may still send it.
   if ((e as { run_in_background?: boolean }).run_in_background === false) {
@@ -280,7 +345,10 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
       return { result: completedRecord({ agentId, text: s.report, prompt: e.prompt, durationMs: s.durationMs, agentType: type }) }
     }
     if (s.kind === 'aborted') return { deny: 'Balancer: the Codex run was interrupted' }
-    if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) return next(e)
+    if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
+      await fellBack($, st, task, s.reason)
+      return next(e)
+    }
     return { result: completedRecord({ agentId, text: buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox }), prompt: e.prompt, durationMs: 0, agentType: type }) }
   }
 
@@ -352,6 +420,12 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   if (delta) c.entry.delta = delta
   await writeLog($, st, c.entry)
 
+  await setRun($, c.rowId, run.outcome === 'aborted' ? null : {
+    effort: c.effort, running: false, durationMs: run.durationMs, ...(delta ? { delta5h: delta.fiveHour } : {}),
+    ...(run.outcome === 'ok' && run.finalMessage !== undefined ? {} : { failed: true }),
+  })
+  await observe($, st)
+
   if (run.outcome === 'aborted') return { kind: 'aborted' }
   const afterGit = git ? await gitSnapshot($, c.cwd) : null
   if (run.outcome === 'ok' && run.finalMessage !== undefined) {
@@ -376,6 +450,7 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
     text = `[balancer] Background agent "${c.description}" (${c.agentId}) finished on Codex.\n\n${s.report}`
   } else if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
     st.cooldownUntil = (await $.clock.now()) + COOLDOWN_MS
+    await fellBack($, st, c, s.reason, true)
     text = `[balancer] Codex could not run "${c.description}" (${s.reason}), nothing was changed, ` +
       'delegate it again and it will run on Claude.'
   } else {
@@ -383,6 +458,15 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
       buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox })
   }
   await $.prompt.submit({ text })
+}
+
+// A failure that put the task back on Claude: the row loses its Codex line, and the person is told (once, spawn errors already were).
+async function fellBack($: EngineInterface, st: State, c: Task, reason: string, cooling = false): Promise<void> {
+  await setRun($, c.rowId, null)
+  if (reason === 'codex missing') return
+  await quietly(() => $.ui.toast(
+    `Balancer: Codex failed (${reason}), ${cooling ? 'subagents run on Claude for the next 15 minutes.' : 'the task ran on Claude.'}`,
+  ))
 }
 
 // ---------- other hooks ----------
@@ -405,7 +489,10 @@ export async function onSessionEnd($: EngineInterface, st: State, e: { sessionId
 export async function onMeasure($: EngineInterface, st: State, e: { rateLimits: Parameters<typeof claudeFromUsage>[0] }) {
   const now = await $.clock.now()
   const live = claudeFromUsage(e.rateLimits, now)
-  if (live) await saveReading($, 'claude', mergeClaude(await loadReading($, 'claude'), live, now) ?? live)
+  const stored = await loadReading($, 'claude')
+  const merged = live ? (mergeClaude(stored, live, now) ?? live) : mergeClaude(stored, null, now)
+  if (live) await saveReading($, 'claude', merged ?? live)
+  await observe($, st, merged)
 }
 
 export async function onRateLimitError($: EngineInterface, st: State) {
@@ -434,4 +521,76 @@ export async function onBalance($: EngineInterface, st: State, args: string): Pr
       inflight: await listInflight($, now, st.opts.taskTimeoutMs), recent: st.recent,
     }),
   }
+}
+
+// ---------- plan mode, nudge (PRD 9) ----------
+
+/** The permission mode a prompt was submitted in (classic UserPromptSubmit); a mode changed mid-turn is seen at the next prompt. */
+export function onUserPrompt(st: State, e: { permission_mode?: string }): void {
+  st.permissionMode = e.permission_mode
+}
+
+/** Attaches the armed reminder to a typed prompt, once. Not to a slash command or a prompt the person did not type. */
+export function onPromptSubmit(st: State, e: PromptSubmitInput, next: Next<'prompt.submit'>) {
+  if (!st.tight || !st.armed || e.command || e.isMeta) return next(e)
+  st.armed = false
+  return next({ ...e, context: [...(e.context ?? []), NUDGE_TEXT] })
+}
+
+/** A compaction that went through, while in claude-tight, arms the reminder again. Subagent and precompute runs do not count. */
+export function onCompacted(st: State, e: SessionCompactInput, r: SessionCompactResult): void {
+  if (st.tight && e.agentId === undefined && e.trigger !== 'precompute' && r.messages !== undefined) st.armed = true
+}
+
+// ---------- /codex <task> (PRD 10) ----------
+
+// Same runner, reservation and post-run reading as an Agent run, but asked for by the person: no routing decision,
+// no Claude call. A failed run is reported in the answer; nothing falls back, since no Claude task waits.
+export async function onCodexCommand($: EngineInterface, st: State, args: string): Promise<{ text: string }> {
+  const task = args.trim()
+  if (task === '') return { text: CODEX_USAGE }
+  if (modeNow(st) === 'off') return { text: 'Balancer is off for this session (mode off), so /codex will not run. Use /balance auto to turn it on.' }
+  if (await optedOut($)) return { text: 'This project opted out of Codex (.claude/balancer.json has "codex": false), so /codex will not run here.' }
+  const sessionId = await $.session.id()
+  const cwd = await $.session.cwd()
+  const dd = await dataDir($, st)
+  const type = 'command'
+  const picked = await st.exclusive(async () => {
+    const now = await $.clock.now()
+    if (!(await codexUsable($, st, now))) return null
+    const claude = await claudeReading($, st, now)
+    const codex = await codexReading($, st, now)
+    const estimate = await loadEstimate($, type)
+    const agentId = newAgentId()
+    await addInflight($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type })
+    const entry: DecisionEntry = {
+      t: now, session: sessionId, agentType: type, route: 'codex', reason: 'mode-codex',
+      claudeAfter: Math.round(score(claude, now, st.opts.claudeCost) * 10) / 10,
+      codexAfter: Math.round(score(codex, now, estimate) * 10) / 10, estimate, mode: modeNow(st),
+    }
+    return { agentId, estimate, codex, entry, overlapped: (await listInflight($, now, st.opts.taskTimeoutMs)).length > 1 }
+  })
+  if (!picked) return { text: 'Codex is not available (not installed or not logged in), so /codex cannot run.' }
+
+  const { agentId } = picked
+  const c: Task = {
+    agentId, sessionId, type, description: '/codex', prompt: task, cwd, sandbox: 'workspace-write', effort: 'high',
+    outFile: `${dd}/runs/${agentId}.last.txt`, estimate: picked.estimate, codexBefore: picked.codex,
+    overlappedStart: picked.overlapped, entry: picked.entry,
+  }
+  // Registered like a background run so that ending the session stops it.
+  const ac = new AbortController()
+  let finish = () => {}
+  const done = new Promise<void>(r => { finish = r })
+  st.runs.set(agentId, { ac, sessionId, description: '/codex', done })
+  let s: Settled
+  try {
+    s = await runTask($, st, c, ac.signal, `${dd}/runs/${agentId}.full.txt`)
+  } finally {
+    st.runs.delete(agentId)
+    finish()
+  }
+  if (s.kind === 'ok') return { text: s.report }
+  if (s.kind === 'aborted') return { text: 'The Codex run was interrupted.' }
+  return { text: buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox }) }
 }

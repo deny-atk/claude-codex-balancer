@@ -39,7 +39,17 @@ export type World = {
   usage: { kind: string; percentUsed: number; resetsAt?: string }[]
   loginChecks: number
   failWrites: boolean
+  statuses: (string | undefined)[] // every $.ui.status call, in order
+  contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
+  state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
+  modelCalls: string[] // model.complete / classify / fork that reached the bottom: the mod must make none
+  toolOps: string[] // tool.register / tool.list that reached the bottom
+  compose: number // prompt.compose calls that reached the bottom
+  commands: string[] // command.register names
+  clock: { advance: (ms: number) => Promise<void> }
 }
+
+export const SECTIONS = [{ id: 'core:one', text: 'ONE', scope: 'shared' }, { id: 'core:two', text: 'TWO', scope: 'session' }]
 
 type Rd = { fiveUsed: number; fiveLeft?: number; sevenUsed: number; sevenLeft?: number; readAt?: number; limit?: boolean }
 export const reading = (r: Rd) => ({
@@ -71,9 +81,10 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
     spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, cwdExists: true, loggedIn: true,
-    git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false, ...over,
+    git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
+    statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
   }
-  mock.clock(on, { now: NOW })
+  w.clock = mock.clock(on, { now: NOW })
   mock.env(on, { HOME, CLAUDE_CONFIG_DIR: CFG })
 
   on('session.cwd', () => ({ value: CWD }))
@@ -136,8 +147,22 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   })
 
   on('ui.toast', (_$: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
-  on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
-  on('prompt.submit', (_$: any, e: any) => { w.submits.push(e.text); return { text: e.text } })
+  on('command.register', (_$: any, e: any) => { w.commands.push(e.name); return { value: { command: e.name } } })
+  on('ui.status', (_$: any, e: any) => { w.statuses.push(e.text); return { value: undefined } })
+  const sk = (e: any) => `${e.plugin}/${e.key}/${e.id ?? ''}`
+  on('state.get', (_$: any, e: any) => ({ value: w.state.get(sk(e)) ?? { value: undefined, version: 0 } }))
+  on('state.set', (_$: any, e: any) => {
+    const version = (w.state.get(sk(e))?.version ?? 0) + 1
+    w.state.set(sk(e), { value: e.value, version })
+    return { value: { isSet: true, version } }
+  })
+  for (const n of ['model.complete', 'model.classify', 'model.fork'] as const) on(n, () => { w.modelCalls.push(n); throw new Error('model call') })
+  on('tool.register', (_$: any, e: any) => { w.toolOps.push(`register ${e.name}`); return { value: { name: e.name } } })
+  on('tool.list', () => { w.toolOps.push('list'); return { value: [] } })
+  on('prompt.compose', () => { w.compose++; return { sections: SECTIONS } })
+  on('prompt.submit', (_$: any, e: any) => { w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
+  on('session.compact', (_$: any, e: any) => ({ messages: e.messages }))
+  on('classic.UserPromptSubmit', () => ({}))
   on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); return { result: CLAUDE_MARK } })
   on('tool.call', { tool: 'TaskStop' }, (_$: any, e: any) => { w.stopCalls.push(e); return { result: { message: 'claude-stop', task_id: e.task_id, task_type: 'x' } } })
   on('session.start', async (_$: any, e: any) => ({ cwd: e.cwd }))
@@ -163,3 +188,18 @@ export const settleReal = async (until: () => boolean = () => false, ms = 1000) 
 export const inflightKeys = (w: World) => [...w.store.keys()].filter(k => k.startsWith('inflight/'))
 export const logLines = (w: World): any[] =>
   (w.files.get(`${DATA}/decisions.jsonl`) ?? '').split('\n').filter(l => l).map(l => JSON.parse(l))
+
+const iso = (t: number) => new Date(t).toISOString()
+/** Raises session.measure with live Claude windows at `five` and `seven` percent used, full windows ahead. */
+export const measure = async ($: any, w: World, five: number, seven: number) => {
+  await w.clock.advance(60_000) // a measure at the same instant as the stored reading would lose the tie
+  return $.session.measure({
+    context: {}, changed: ['rateLimits'],
+    rateLimits: [
+      { kind: 'five_hour', percentUsed: five, resetsAt: iso(NOW + 5 * H) },
+      { kind: 'seven_day', percentUsed: seven, resetsAt: iso(NOW + 7 * D) },
+    ],
+  })
+}
+/** Codex at 0% with full windows: Claude at u% used then has gap u. */
+export const CODEX_IDLE = { 'reading/codex': reading({ fiveUsed: 0, sevenUsed: 0 }) }
