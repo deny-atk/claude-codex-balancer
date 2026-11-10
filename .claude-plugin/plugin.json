@@ -1,0 +1,101 @@
+{
+  "name": "balancer",
+  "version": "0.1.0",
+  "description": "Shares delegated subagent work between Claude and the local Codex CLI so both subscriptions are used at a similar pace.",
+  "author": {
+    "name": "Balancer"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "auto balances by runway; claude, codex or off force the route",
+      "default": "auto",
+      "options": [
+        "auto",
+        "claude",
+        "codex",
+        "off"
+      ]
+    },
+    "margin": {
+      "type": "number",
+      "title": "Margin",
+      "description": "Runway points Codex must lead by",
+      "default": 5
+    },
+    "ceilingFiveHour": {
+      "type": "number",
+      "title": "5-hour ceiling",
+      "description": "Do not route to a provider at or above this 5-hour use (percent)",
+      "default": 95
+    },
+    "ceilingSevenDay": {
+      "type": "number",
+      "title": "Weekly ceiling",
+      "description": "Do not route to a provider at or above this weekly use (percent)",
+      "default": 97
+    },
+    "eligibleAgentTypes": {
+      "type": "string",
+      "title": "Eligible agent types",
+      "description": "Comma-separated subagent types that may run on Codex",
+      "default": "general-purpose,claude,Explore"
+    },
+    "effortMap": {
+      "type": "string",
+      "title": "Effort map",
+      "description": "Agent model to Codex reasoning effort, as model=effort pairs",
+      "default": "haiku=low,sonnet=medium,opus=high,default=high"
+    },
+    "codexModel": {
+      "type": "string",
+      "title": "Codex model",
+      "description": "Override Codex's default model; empty keeps the default",
+      "default": ""
+    },
+    "maxConcurrentCodex": {
+      "type": "number",
+      "title": "Max concurrent Codex tasks",
+      "description": "Across all sessions on this machine",
+      "default": 2
+    },
+    "taskTimeoutMinutes": {
+      "type": "number",
+      "title": "Task timeout (minutes)",
+      "description": "Per Codex run",
+      "default": 30
+    },
+    "staleAfterMinutes": {
+      "type": "number",
+      "title": "Stale after (minutes)",
+      "description": "Age at which a Codex reading is refreshed",
+      "default": 15
+    },
+    "claudeTaskCostFiveHour": {
+      "type": "number",
+      "title": "Claude task cost, 5-hour",
+      "description": "Points of the 5-hour window per task",
+      "default": 1
+    },
+    "claudeTaskCostSevenDay": {
+      "type": "number",
+      "title": "Claude task cost, weekly",
+      "description": "Points of the weekly window per task",
+      "default": 0.2
+    },
+    "maxResultChars": {
+      "type": "number",
+      "title": "Max result characters",
+      "description": "Cap on the returned report",
+      "default": 30000
+    },
+    "nudge": {
+      "type": "boolean",
+      "title": "Nudge",
+      "description": "Inject the delegation nudge when Claude is tight",
+      "default": true
+    }
+  }
+}
