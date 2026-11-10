@@ -2,7 +2,7 @@ import { test, expect } from 'claude-code/testing'
 import { createState, onAgent } from '../hooks/dispatch'
 import {
   CLAUDE_MARK, CODEX_AHEAD, CODEX_TEXT, CWD, DATA, H, NOW, PRD_74, SID,
-  agent, inflightKeys, logLines, reading, rolloutFor, settleReal, startSession, world,
+  agent, THREAD, inflightKeys, logLines, reading, rolloutFor, settleReal, startSession, world,
 } from './harness'
 
 const OPTS = (o: Record<string, unknown>) => ({ options: o as any })
@@ -787,4 +787,115 @@ test('dw11_a_failed_run_logs_no_prompt_description_or_failure_message', async ($
   for (const secret of ['PROMPT-SECRET-77', 'DESC-SECRET-88', FAIL]) expect(raw).not.toContain(secret)
   expect(logLines(w)).toHaveLength(2)
   for (const l of logLines(w)) expect(l).toMatchObject({ route: 'codex', outcome: 'failed', exitCode: 1 })
+})
+
+// ---------- work is saved when Codex stops part-way ----------
+
+const PARTIAL = 'PARTIAL-NOTES-55'
+const RESUME = `codex exec resume ${THREAD}`
+const LIMIT_WORLD = (on: any, over: Record<string, unknown> = {}) => {
+  const w = world(on, CODEX_AHEAD, { script: 'limit', partial: PARTIAL, git: ['', ' M a.py\n?? new.py'], diff: 'DIFF-OUTPUT-66', tracked: new Set(['a.py']), ...over } as any)
+  w.work.set('a.py', 'v1'); w.work.set('new.py', 'v1')
+  return w
+}
+
+test('dw5_limit_hit_with_edits_saves_a_patch_and_the_failure_text_names_everything', async ($, on) => {
+  const w = LIMIT_WORLD(on)
+  const r: any = await $.tool.call(agent(GP) as any)
+  const id = r.result.agentId
+  const text: string = r.result.content[0].text
+  expect(w.files.get(`${DATA}/runs/${id}.patch`)).toBe('DIFF-OUTPUT-66')
+  expect(text).toContain(`${DATA}/runs/${id}.patch`)
+  expect(text).toContain('Untracked')
+  expect(text).toContain('new.py')
+  expect(text).toContain(PARTIAL)
+  expect(w.files.get(`${DATA}/runs/${id}.partial.txt`)).toBe(PARTIAL)
+  expect(text).toContain(`${DATA}/runs/${id}.partial.txt`)
+  expect(text).toContain(RESUME)
+  expect(w.gitCalls).toContainEqual(['git', 'diff', 'HEAD', '--', 'a.py'])
+  for (const c of w.gitCalls) expect(['status', 'hash-object', 'ls-files', 'diff']).toContain(c[1]!) // no index, stash or commit
+  expect(w.agentCalls).toHaveLength(0)
+})
+
+test('dw5_a_plain_failure_with_edits_has_a_patch_but_no_resume_hint', async ($, on) => {
+  const w = LIMIT_WORLD(on, { script: 'fail' })
+  const r: any = await $.tool.call(agent(GP) as any)
+  expect(w.files.get(`${DATA}/runs/${r.result.agentId}.patch`)).toBe('DIFF-OUTPUT-66')
+  expect(r.result.content[0].text).not.toContain('codex exec resume')
+})
+
+test('dw5_a_failing_patch_write_never_changes_the_answer', async ($, on) => {
+  const w = LIMIT_WORLD(on, { failWrites: true })
+  const r: any = await $.tool.call(agent(GP) as any)
+  const text: string = r.result.content[0].text
+  expect(text).toContain('Files changed so far: a.py, new.py.')
+  expect(text).not.toContain('.patch')
+  expect(w.agentCalls).toHaveLength(0)
+})
+
+test('dw5_background_limit_hit_with_edits_delivers_patch_untracked_partial_and_resume', async ($, on) => {
+  const w = LIMIT_WORLD(on)
+  const r: any = await $.tool.call(agent({ ...GP, run_in_background: undefined }) as any)
+  await settleReal(() => w.submits.length > 0)
+  const id = r.result.agentId
+  expect(w.files.get(`${DATA}/runs/${id}.patch`)).toBe('DIFF-OUTPUT-66')
+  for (const part of [`${id}.patch`, 'new.py', PARTIAL, `${id}.partial.txt`, RESUME]) expect(w.submits[0]).toContain(part)
+})
+
+test('dw5_read_only_limit_hit_with_partial_notes_carries_them_into_the_claude_prompt', async ($, on) => {
+  const w = LIMIT_WORLD(on)
+  const input = agent() // Explore: read-only, falls back to Claude
+  const r: any = await $.tool.call(input as any)
+  expect(r.result).toEqual(CLAUDE_MARK)
+  const got = w.agentCalls[0]
+  expect(got).toEqual({ ...input, prompt: got.prompt, tool_use_id: got.tool_use_id })
+  expect(got.prompt).toStartWith(input.prompt + '\n\n')
+  expect(got.prompt).toContain('limit reached')
+  expect(got.prompt).toContain(PARTIAL)
+  expect(got.prompt).toMatch(/verify/i)
+})
+
+test('dw5_sync_failure_with_no_changes_and_partial_notes_carries_them_too', async ($, on) => {
+  const w = LIMIT_WORLD(on, { git: ['', ''] })
+  await $.tool.call(agent(GP) as any)
+  expect(w.agentCalls[0].prompt).toContain(PARTIAL)
+  expect(w.files.size).toBeGreaterThan(0)
+  expect([...w.files.keys()].some(k => k.endsWith('.patch'))).toBe(false)
+})
+
+test('dw5_a_fallback_without_partial_notes_leaves_the_input_untouched', async ($, on) => {
+  const w = LIMIT_WORLD(on, { partial: undefined })
+  const input = agent()
+  await $.tool.call(input as any)
+  same(w.agentCalls[0], input)
+})
+
+test('dw5_partial_notes_are_cut_at_4000_characters', async ($, on) => {
+  const w = LIMIT_WORLD(on, { partial: 'p'.repeat(6000) })
+  await $.tool.call(agent() as any)
+  const prompt: string = w.agentCalls[0].prompt
+  expect(prompt).toContain('p'.repeat(4000))
+  expect(prompt).not.toContain('p'.repeat(4001))
+})
+
+test('dw5_background_read_only_limit_hit_puts_the_partial_notes_in_the_cooldown_message', async ($, on) => {
+  const w = LIMIT_WORLD(on)
+  await $.tool.call(agent({ run_in_background: undefined }) as any)
+  await settleReal(() => w.submits.length > 0)
+  expect(w.submits[0]).toContain('delegate it again')
+  expect(w.submits[0]).toContain(PARTIAL)
+})
+
+test('dw5_background_read_only_limit_hit_without_notes_adds_none', async ($, on) => {
+  const w = LIMIT_WORLD(on, { partial: undefined })
+  await $.tool.call(agent({ run_in_background: undefined }) as any)
+  await settleReal(() => w.submits.length > 0)
+  expect(w.submits[0]).not.toMatch(/partial/i)
+})
+
+test('dw11_the_log_holds_no_partial_text_or_patch', async ($, on) => {
+  const w = LIMIT_WORLD(on)
+  await $.tool.call(agent(GP) as any)
+  const raw = w.files.get(`${DATA}/decisions.jsonl`)!
+  for (const secret of [PARTIAL, 'DIFF-OUTPUT-66']) expect(raw).not.toContain(secret)
 })

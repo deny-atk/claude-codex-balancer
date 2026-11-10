@@ -36,6 +36,10 @@ export type World = {
   cwdExists: boolean
   loggedIn: boolean
   loginThrows: boolean // `codex login status` cannot even start (binary missing)
+  tracked: Set<string> // paths `git ls-files` knows
+  diff: string // stdout of `git diff HEAD -- ...`
+  partial?: string // an agent_message the stub emits before a failure or limit
+  gitCalls: string[][] // every git argv
   work: Map<string, string> // file contents the stubbed `git hash-object` hashes, by path
   during?: () => void // runs when a Codex process starts: a test edits `work` here
   gate: Promise<void> // script 'gate': the run finishes once this resolves
@@ -86,7 +90,7 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
-    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, loggedIn: true, loginThrows: false, work: new Map(),
+    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [],
     gate: undefined as any, openGate: () => {},
     git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
@@ -126,6 +130,12 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('process.run', (_$: any, e: any) => {
     const [a, b] = e.argv as string[]
     if (a === 'codex' && b === 'login') { w.loginChecks++; if (w.loginThrows) throw new Error('spawn codex ENOENT'); return { value: { exitCode: w.loggedIn ? 0 : 1, stdout: '', stderr: '' } } }
+    if (a === 'git') w.gitCalls.push([...(e.argv as string[])])
+    if (a === 'git' && b === 'ls-files') {
+      const paths = (e.argv as string[]).slice((e.argv as string[]).indexOf('--') + 1)
+      return { value: { exitCode: 0, stdout: paths.filter(p => w.tracked.has(p)).map(p => p + '\0').join(''), stderr: '' } }
+    }
+    if (a === 'git' && b === 'diff') return { value: { exitCode: 0, stdout: w.diff, stderr: '' } }
     if (a === 'git' && b === 'hash-object') {
       const paths = (e.argv as string[]).slice((e.argv as string[]).indexOf('--') + 1)
       return { value: { exitCode: 0, stdout: paths.map(p => 'h:' + (w.work.get(p) ?? '')).join('\n') + '\n', stderr: '' } }
@@ -152,8 +162,8 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
         if (w.script === 'gate') await w.gate
         yield ev({ type: 'item.completed', item: { type: 'agent_message', text: w.finalText } })
         yield ev({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
-      } else if (w.script === 'limit') { yield ev({ type: 'error', message: 'You have hit your usage limit' }); code = 1 }
-      else { yield ev({ type: 'turn.failed', error: { message: w.failMessage } }); code = 1 }
+      } else if (w.script === 'limit') { if (w.partial) yield ev({ type: 'item.completed', item: { type: 'agent_message', text: w.partial } }); yield ev({ type: 'error', message: 'You have hit your usage limit' }); code = 1 }
+      else { if (w.partial) yield ev({ type: 'item.completed', item: { type: 'agent_message', text: w.partial } }); yield ev({ type: 'turn.failed', error: { message: w.failMessage } }); code = 1 }
     } finally {
       w.spawnFinally++
     }

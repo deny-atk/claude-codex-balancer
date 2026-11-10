@@ -76,11 +76,22 @@ Everything fails safe toward Claude. Before answering a call, Balancer checks th
 | Codex cannot be started | Codex is unusable for the rest of the session, one toast, Claude runs the task. | Same toast and unusable state. A message says Codex could not run the task, nothing changed, re-delegating runs on Claude. 15-minute cooldown. |
 | Run fails or times out, `read-only` sandbox | Claude runs the task. Toast with the reason. | Message as above, 15-minute cooldown, toast. |
 | Run fails or times out, `workspace-write`, no files changed | Claude runs the task. Toast. | Message as above, cooldown, toast. |
-| Run fails or times out, `workspace-write`, files changed | Result says Codex stopped part-way, lists the changed files and says not to re-run from the top. Claude does not re-run it. | The same text is delivered as a message. No cooldown. |
+| Run fails or times out, `workspace-write`, files changed | Result says Codex stopped part-way, lists the changed files, saves a patch and partial notes (see below) and says not to re-run from the top. Claude does not re-run it. | The same text is delivered as a message. No cooldown. |
 | Run fails, `workspace-write`, git cannot say what changed (not a repository) | Result says Codex could not run and the check was impossible. No re-run. | Delivered as a message. No cooldown. |
 | Codex reports a usage limit | Codex is marked limited until the earliest known reset, then as the rows above. | Same. |
 | Claude turn fails with a `rate_limit` error | Claude is marked limited until its earliest known reset (one 5-hour window when none is known), so Codex takes tasks while usable. | Same. |
 | Balancer's own hook throws | The engine skips the hook and Claude runs the subagent. There is no catch that denies. | Same. |
+
+Work is saved when a run stops part-way (any failure, a usage limit included; not a finished or interrupted run). Balancer never reverts or commits anything, and runs only `git ls-files` and `git diff HEAD`, which touch no index or stash.
+
+- Patch: if files changed, `git diff HEAD -- <changed tracked paths>` is written to `runs/<agentId>.patch`. The failure text names the patch and lists the changed untracked files separately, since a diff does not hold them (they stay on disk). A failed write changes nothing else.
+- Partial report: Codex's last message, if it sent one, is written to `runs/<agentId>.partial.txt` and appears in the failure text, cut at 4000 characters, with the path.
+- Resume hint: when the run has a session id and hit a usage limit or timed out, the text ends with the session id and `codex exec resume <id>`, to continue after the limit resets. Balancer does not run it.
+- Carry-over: when a failed run falls back to Claude (sync read-only, or no files changed) and there is a partial message, the Agent call goes on with `\n\n` and a labelled block added to its prompt: a previous Codex attempt stopped (reason), here are its notes, verify them. With no partial message the call passes through untouched. In background mode the same block is in the cooldown message, so the re-delegation can include it.
+
+The decision log holds none of this text.
+
+Say Codex hits its limit after editing `a.py` (tracked) and creating `new.py`, having told us "parser done, tests next". The text names `runs/<id>.patch` (the `a.py` diff), says `new.py` is untracked, quotes "parser done, tests next" and ends with the `codex exec resume` command. If the task had been read-only, Claude would instead get the original brief followed by that note.
 
 "Files changed" is decided by content, not by status codes. Before and after a `workspace-write` run Balancer takes `git status --porcelain --untracked-files=all` and one `git hash-object` over the listed paths (a deleted path counts as `missing`). A path is reported when it is new in the list, has a different hash, or has dropped out of the list. Say `a.py` was already modified and `notes.txt` was untracked before the run, and Codex edits both again without changing their status codes: both hashes differ, so both are named and Claude does not re-run the task. A file that was modified before the run and restored by Codex is named too. Outside a git repository the check is impossible (the row above).
 

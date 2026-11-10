@@ -362,3 +362,20 @@ test('formatDuration', () => {
   expect(formatDuration(0)).toBe('0s')
   expect(formatDuration(60_000)).toBe('1m0s')
 })
+
+test('dw5_buildFailureText carries patch, untracked files, partial notes and the resume hint', () => {
+  const t = buildFailureText({
+    reason: 'limit reached', changedFiles: ['a.py', 'new.py'], sandbox: 'workspace-write',
+    patchPath: '/d/x.patch', untracked: ['new.py'], partial: { text: 'NOTES', path: '/d/x.partial.txt' }, resumeThreadId: 'thr-1',
+  })
+  expect(t).toContain('/d/x.patch')
+  expect(t).toMatch(/untracked.*new\.py/i)
+  expect(t).toContain('NOTES')
+  expect(t).toContain('/d/x.partial.txt')
+  expect(t.trimEnd()).toMatch(/thr-1.*codex exec resume thr-1.*$/s)
+  const bare = buildFailureText({ reason: 'x', changedFiles: [], sandbox: 'workspace-write', partial: { text: 'N'.repeat(5000), path: '/p' } })
+  expect(bare).toContain('N'.repeat(4000))
+  expect(bare).not.toContain('N'.repeat(4001))
+  expect(bare).toContain('No files were changed')
+  expect(buildFailureText({ reason: 'x', changedFiles: null, sandbox: 'workspace-write' })).not.toContain('resume')
+})

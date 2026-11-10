@@ -7,7 +7,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  effortFor, gitSnapshot, newAgentId, parseEffortMap, runCodex, sandboxFor, taskStopRecord,
+  effortFor, gitSnapshot, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate, FIVE_HOUR_MS } from './policy'
@@ -89,6 +89,7 @@ type Task = {
   agentId: string; sessionId: string; type: string; description: string; prompt: string
   rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
   cwd: string; sandbox: Sandbox; effort: string; outFile: string
+  base: string // `<data>/runs/<agentId>`: the patch and partial notes go beside the other run files
   estimate: Cost; codexBefore: ProviderReading | null
   entry: DecisionEntry
 }
@@ -96,7 +97,13 @@ type Task = {
 type Settled =
   | { kind: 'ok'; report: string; durationMs: number }
   | { kind: 'aborted' }
-  | { kind: 'fail'; reason: string; changed: string[] | null; sandbox: Sandbox }
+  | { kind: 'fail'; reason: string; changed: string[] | null; sandbox: Sandbox; saved: Saved }
+
+// What a stopped run left behind besides edited files (item: work is saved when Codex hits a limit).
+type Saved = { patchPath?: string; untracked?: string[]; partial?: { text: string; path?: string }; resumeThreadId?: string }
+
+const failureText = (s: { reason: string; changed: string[] | null; sandbox: Sandbox; saved: Saved }) =>
+  buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox, ...s.saved })
 
 const reasonOf = (r: CodexRun): string =>
   r.outcome === 'spawn-error' ? 'codex missing'
@@ -353,7 +360,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const sandbox = sandboxFor(e.subagent_type, planMode)
   const task: Task = {
     agentId, sessionId, type, description: e.description, prompt: e.prompt, rowId: e.tool_use_id,
-    cwd, sandbox, effort: effortFor(e.model, st.opts.effortMap), outFile: `${dd}/runs/${agentId}.last.txt`,
+    cwd, sandbox, effort: effortFor(e.model, st.opts.effortMap), outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`,
     estimate: picked.estimate, codexBefore: picked.codex, entry: picked.entry,
   }
 
@@ -369,9 +376,10 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     if (s.kind === 'aborted') return { deny: 'Balancer: the Codex run was interrupted' }
     if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
       await fellBack($, st, task, s.reason)
-      return next(e)
+      // What Codex got done is handed on as unverified notes; with none, the call goes through untouched.
+      return next(s.saved.partial ? { ...e, prompt: `${e.prompt}\n\n${partialBlock(s.reason, s.saved.partial.text)}` } : e)
     }
-    return { result: completedRecord({ agentId, text: buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox }), prompt: e.prompt, durationMs: 0, agentType: type }) }
+    return { result: completedRecord({ agentId, text: failureText(s), prompt: e.prompt, durationMs: 0, agentType: type }) }
   }
 
   const outputFile = `${dd}/runs/${agentId}.txt`
@@ -463,7 +471,39 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
       }),
     }
   }
-  return { kind: 'fail', reason: reasonOf(run), changed: git ? changedSince(before, afterGit) : [], sandbox: c.sandbox }
+  const reason = reasonOf(run)
+  const changed = git ? changedSince(before, afterGit) : []
+  return { kind: 'fail', reason, changed, sandbox: c.sandbox, saved: await saveWork($, c, run, changed) }
+}
+
+// Best effort, never throws: a failed write or git call changes nothing but what the text can name.
+async function saveWork($: EngineInterface, c: Task, run: CodexRun, changed: string[] | null): Promise<Saved> {
+  const saved: Saved = {}
+  if (run.finalMessage) {
+    saved.partial = { text: run.finalMessage }
+    try {
+      await $.fs.write(`${c.base}.partial.txt`, run.finalMessage)
+      saved.partial.path = `${c.base}.partial.txt`
+    } catch { /* the text is still given, without a path */ }
+  }
+  if (run.threadId && (run.limitHit || run.outcome === 'timeout')) saved.resumeThreadId = run.threadId
+  if (changed && changed.length > 0) {
+    try {
+      const ls = await $.process.run(['git', 'ls-files', '-z', '--', ...changed], { cwd: c.cwd })
+      if (ls.exitCode === 0) {
+        const tracked = ls.stdout.split('\0').filter(Boolean)
+        saved.untracked = changed.filter(p => !tracked.includes(p))
+        if (tracked.length > 0) {
+          const d = await $.process.run(['git', 'diff', 'HEAD', '--', ...tracked], { cwd: c.cwd })
+          if (d.exitCode === 0 && d.stdout.length > 0) {
+            await $.fs.write(`${c.base}.patch`, d.stdout)
+            saved.patchPath = `${c.base}.patch`
+          }
+        }
+      }
+    } catch { /* no patch */ }
+  }
+  return saved
 }
 
 async function deliverBackground($: EngineInterface, st: State, c: Task, s: Settled, outputFile: string): Promise<void> {
@@ -476,10 +516,11 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
     st.cooldownUntil = (await $.clock.now()) + COOLDOWN_MS
     await fellBack($, st, c, s.reason, true)
     text = `[balancer] Codex could not run "${c.description}" (${s.reason}), nothing was changed, ` +
-      'delegate it again and it will run on Claude.'
+      'delegate it again and it will run on Claude.' +
+      (s.saved.partial ? `\n\n${partialBlock(s.reason, s.saved.partial.text)}\nPut them in the new brief if they help.` : '')
   } else {
     text = `[balancer] Background agent "${c.description}" (${c.agentId}): ` +
-      buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox })
+      failureText(s)
   }
   await $.prompt.submit({ text })
 }
@@ -599,7 +640,7 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
   const { agentId } = picked
   const c: Task = {
     agentId, sessionId, type, description: '/codex', prompt: task, cwd, sandbox: 'workspace-write', effort: 'high',
-    outFile: `${dd}/runs/${agentId}.last.txt`, estimate: picked.estimate, codexBefore: picked.codex,
+    outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`, estimate: picked.estimate, codexBefore: picked.codex,
     entry: picked.entry,
   }
   // Registered like a background run so that ending the session stops it.
@@ -616,5 +657,5 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
   }
   if (s.kind === 'ok') return { text: s.report }
   if (s.kind === 'aborted') return { text: 'The Codex run was interrupted.' }
-  return { text: buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox }) }
+  return { text: failureText(s) }
 }

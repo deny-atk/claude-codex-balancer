@@ -261,14 +261,36 @@ export function buildReport(o: {
   return out
 }
 
-export function buildFailureText(o: { reason: string; changedFiles: string[] | null; sandbox: Sandbox }): string {
+export const PARTIAL_MAX_CHARS = 4000
+const cutPartial = (t: string) => (t.length > PARTIAL_MAX_CHARS ? t.slice(0, PARTIAL_MAX_CHARS) + '\n[cut]' : t)
+
+/** Codex's last message from a run that stopped, labelled for Claude: to be checked, not believed. */
+export function partialBlock(reason: string, text: string): string {
+  return `[balancer] A previous attempt at this task on Codex stopped (${reason}). Its partial notes follow. ` +
+    `They are unverified: verify them before relying on them.\n\n${cutPartial(text)}`
+}
+
+export function buildFailureText(o: {
+  reason: string; changedFiles: string[] | null; sandbox: Sandbox
+  patchPath?: string; untracked?: string[]; partial?: { text: string; path?: string }; resumeThreadId?: string
+}): string {
+  let out: string
   if (o.changedFiles && o.changedFiles.length > 0) {
-    const files = o.changedFiles.join(', ')
-    return `Codex stopped before finishing (${o.reason}). Files changed so far: ${files}. ` +
+    out = `Codex stopped before finishing (${o.reason}). Files changed so far: ${o.changedFiles.join(', ')}. ` +
       'Do not re-run the whole task from the top: inspect those files and decide how to continue.'
+    if (o.patchPath) out += ` The diff of the tracked changes is saved in ${o.patchPath}.`
+    if (o.untracked && o.untracked.length > 0) {
+      out += ` Untracked files (a diff does not hold them, they are still on disk): ${o.untracked.join(', ')}.`
+    }
+  } else if (o.changedFiles === null) out = `Codex could not run the task (${o.reason}). Balancer could not check for changed files.`
+  else out = `Codex could not run the task (${o.reason}). No files were changed.`
+  if (o.partial) {
+    out += `\n\nCodex's last message before it stopped${o.partial.path ? ` (saved in ${o.partial.path})` : ''}, unverified:\n${cutPartial(o.partial.text)}`
   }
-  if (o.changedFiles === null) return `Codex could not run the task (${o.reason}). Balancer could not check for changed files.`
-  return `Codex could not run the task (${o.reason}). No files were changed.`
+  if (o.resumeThreadId) {
+    out += `\n\nCodex session ${o.resumeThreadId}. After the limit resets, \`codex exec resume ${o.resumeThreadId}\` continues it (Balancer does not run this).`
+  }
+  return out
 }
 
 // ---------- records ----------
