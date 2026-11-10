@@ -11,7 +11,7 @@ export type Mode = 'auto' | 'claude' | 'codex' | 'off'
 export type PolicyConfig = { margin: number; ceilingFiveHour: number; ceilingSevenDay: number; maxConcurrentCodex: number }
 export type ReasonCode =
   | 'mode-off' | 'mode-claude' | 'mode-codex' | 'codex-unavailable' | 'codex-limit' | 'codex-concurrency'
-  | 'codex-ceiling' | 'claude-ceiling' | 'no-codex-reading' | 'codex-ahead' | 'claude-ahead'
+  | 'codex-ceiling' | 'claude-ceiling' | 'no-codex-reading' | 'codex-ahead' | 'claude-ahead' | 'codex-cooldown'
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x))
 

@@ -270,6 +270,12 @@ test('dw5_buildFailureText with and without changed files', () => {
   expect(buildFailureText({ reason: 'x', changedFiles: null, sandbox: 'read-only' })).toContain('could not run')
 })
 
+test('dw5_buildFailureText does not claim no files changed when git cannot tell', () => {
+  const t = buildFailureText({ reason: 'exit 1', changedFiles: null, sandbox: 'workspace-write' })
+  expect(t).toContain('could not check for changed files')
+  expect(t).not.toMatch(/no files were changed/i)
+})
+
 // ---------- report ----------
 
 test('report: cap with note and path; git status limited to 50', () => {

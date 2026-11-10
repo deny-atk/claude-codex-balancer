@@ -222,6 +222,7 @@ export function buildFailureText(o: { reason: string; changedFiles: string[] | n
     return `Codex stopped before finishing (${o.reason}). Files changed so far: ${files}. ` +
       'Do not re-run the whole task from the top: inspect those files and decide how to continue.'
   }
+  if (o.changedFiles === null) return `Codex could not run the task (${o.reason}). Balancer could not check for changed files.`
   return `Codex could not run the task (${o.reason}). No files were changed.`
 }
 

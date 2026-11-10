@@ -165,16 +165,24 @@ export async function loadReading($: EngineInterface, provider: Provider): Promi
   const v = await $.store.get(`reading/${provider}`)
   return isReading(v) ? v : null
 }
-export const saveReading = ($: EngineInterface, provider: Provider, r: ProviderReading) => $.store.set(`reading/${provider}`, r)
+export function saveReading($: EngineInterface, provider: Provider, r: ProviderReading) {
+  return $.store.set(`reading/${provider}`, r)
+}
 
 export async function loadEstimate($: EngineInterface, agentType: string): Promise<Cost> {
   const v = await $.store.get(`estimate/${agentType}`)
   return isCost(v) ? v : { fiveHour: 5, sevenDay: 1 }
 }
-export const saveEstimate = ($: EngineInterface, agentType: string, c: Cost) => $.store.set(`estimate/${agentType}`, c)
+export function saveEstimate($: EngineInterface, agentType: string, c: Cost) {
+  return $.store.set(`estimate/${agentType}`, c)
+}
 
-export const addInflight = ($: EngineInterface, rec: Inflight) => $.store.set(`inflight/${rec.id}`, rec)
-export const removeInflight = ($: EngineInterface, id: string) => $.store.delete(`inflight/${id}`)
+export function addInflight($: EngineInterface, rec: Inflight) {
+  return $.store.set(`inflight/${rec.id}`, rec)
+}
+export function removeInflight($: EngineInterface, id: string) {
+  return $.store.delete(`inflight/${id}`)
+}
 
 export async function listInflight($: EngineInterface, now: number, timeoutMs: number): Promise<Inflight[]> {
   const out: Inflight[] = []
