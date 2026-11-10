@@ -113,8 +113,21 @@ export type CodexRun = {
   durationMs: number
 }
 
+const CLEANUP_MS = 5000
+
+async function boundedCleanup(
+  cleanup: Promise<unknown>, ms: number,
+  g: { setTimeout?: (f: () => void, ms: number) => unknown; clearTimeout?: (h: unknown) => void },
+): Promise<void> {
+  let h: unknown
+  const cap = new Promise<void>(res => { h = g.setTimeout?.(res, ms) })
+  await Promise.race([cleanup, cap])
+  if (h !== undefined) g.clearTimeout?.(h)
+}
+
 export async function runCodex($: $, o: {
   argv: string[]; input?: string; cwd: string; timeoutMs: number; signal?: AbortSignal
+  cleanupMs?: number // how long to wait for the child to exit after a stop (default 5 s)
 }): Promise<CodexRun> {
   const t0 = await $.clock.now()
   const parser = createEventParser()
@@ -158,7 +171,9 @@ export async function runCodex($: $, o: {
     spawnMessage = String((err as { message?: unknown })?.message ?? err).slice(0, 200)
     ended = true
   } finally {
-    if (!ended) void Promise.resolve(it.return?.(undefined as never)).catch(() => {}) // kills the child
+    // Kills the child. Awaited, so the caller releases its reservation only once the child is gone; bounded, so a stuck
+    // cleanup cannot hang the hook.
+    if (!ended) await boundedCleanup(Promise.resolve(it.return?.(undefined as never)).catch(() => {}), o.cleanupMs ?? CLEANUP_MS, g)
     if (timer !== undefined) g.clearTimeout?.(timer)
     o.signal?.removeEventListener('abort', onAbort)
   }
@@ -174,18 +189,48 @@ export async function runCodex($: $, o: {
 
 // ---------- git ----------
 
+// One line per path git lists: `<path>\t<content hash>`. The status codes alone miss a second edit to a file that was
+// already modified or untracked, so the content is compared too.
+// shortcut: one `git hash-object` call over every listed path (a batch that fails is retried path by path), so a huge
+// list of untracked files makes a long argv and a slow hash; replace with --stdin-paths if that shows up.
+const unquote = (p: string) => (p.startsWith('"') && p.endsWith('"') && p.length >= 2 ? p.slice(1, -1).replace(/\\(["\\])/g, '$1') : p)
+
 export async function gitSnapshot($: $, cwd: string): Promise<string[] | null> {
   try {
-    const r = await $.process.run(['git', 'status', '--porcelain'], { cwd })
+    const r = await $.process.run(['git', 'status', '--porcelain', '--untracked-files=all'], { cwd })
     if (r.exitCode !== 0) return null
-    return r.stdout.split('\n').filter(l => l.length > 0)
+    const entries = r.stdout.split('\n').filter(l => l.length > 3).map(l => {
+      const rest = l.slice(3)
+      const arrow = rest.indexOf(' -> ')
+      return { path: unquote(arrow >= 0 ? rest.slice(arrow + 4) : rest), deleted: l[0] === 'D' || l[1] === 'D' }
+    })
+    const hashes = new Map<string, string>()
+    const live = [...new Set(entries.filter(e => !e.deleted).map(e => e.path))]
+    const hash = async (paths: string[]): Promise<string[] | null> => {
+      const h = await $.process.run(['git', 'hash-object', '--', ...paths], { cwd })
+      const out = h.stdout.split('\n').filter(x => x.length > 0)
+      return h.exitCode === 0 && out.length === paths.length ? out : null
+    }
+    if (live.length > 0) {
+      let all: string[] | null = null
+      try { all = await hash(live) } catch { /* retried one at a time */ }
+      if (all) live.forEach((p, i) => hashes.set(p, all[i]!))
+      else for (const p of live) hashes.set(p, (await hash([p]).catch(() => null))?.[0] ?? 'missing')
+    }
+    return [...new Map(entries.map(e => [e.path, `${e.path}\t${hashes.get(e.path) ?? 'missing'}`])).values()]
   } catch { return null }
 }
 
+/** Paths whose line is new or changed, or that dropped out of the status (a file restored or deleted). */
 export function changedSince(before: string[] | null, after: string[] | null): string[] | null {
   if (!before || !after) return null
-  const seen = new Set(before)
-  return after.filter(l => !seen.has(l))
+  const split = (l: string) => { const i = l.indexOf('\t'); return [i < 0 ? l : l.slice(0, i), l] as const }
+  const was = new Map(before.map(split))
+  const now = new Map(after.map(split))
+  return [
+    ...[...now].filter(([p, l]) => was.get(p) !== l).map(([p]) => p),
+    ...[...was.keys()].filter(p => !now.has(p)),
+  ]
 }
 
 // ---------- text ----------
@@ -210,7 +255,7 @@ export function buildReport(o: {
       (o.fullTextPath ? ` Full text: ${o.fullTextPath}` : '')
   }
   if (o.sandbox === 'workspace-write' && o.gitStatus) {
-    out += '\n\ngit status --porcelain:\n' + o.gitStatus.slice(0, GIT_LINES_MAX).join('\n')
+    out += '\n\nChanged or untracked files (git status):\n' + o.gitStatus.slice(0, GIT_LINES_MAX).map(l => l.replace(/\t.*$/, '')).join('\n')
     if (o.gitStatus.length > GIT_LINES_MAX) out += `\n… and ${o.gitStatus.length - GIT_LINES_MAX} more`
   }
   return out
@@ -218,7 +263,7 @@ export function buildReport(o: {
 
 export function buildFailureText(o: { reason: string; changedFiles: string[] | null; sandbox: Sandbox }): string {
   if (o.changedFiles && o.changedFiles.length > 0) {
-    const files = o.changedFiles.map(l => l.replace(/^.{1,2}\s+/, '')).join(', ')
+    const files = o.changedFiles.join(', ')
     return `Codex stopped before finishing (${o.reason}). Files changed so far: ${files}. ` +
       'Do not re-run the whole task from the top: inspect those files and decide how to continue.'
   }

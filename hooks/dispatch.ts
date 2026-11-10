@@ -12,6 +12,7 @@ import {
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate, FIVE_HOUR_MS } from './policy'
 import type { Cost, Decision, Mode, PolicyConfig, ProviderReading } from './policy'
+import type { Inflight } from './readings'
 import {
   addInflight, claudeFromUsage, codexAvailable, createReadingCache, currentCodexReading, expireLimit,
   listInflight, loadEstimate, loadReading, pickFresher, readCodexRollout, removeInflight, saveEstimate,
@@ -88,7 +89,7 @@ type Task = {
   agentId: string; sessionId: string; type: string; description: string; prompt: string
   rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
   cwd: string; sandbox: Sandbox; effort: string; outFile: string
-  estimate: Cost; codexBefore: ProviderReading | null; overlappedStart: boolean
+  estimate: Cost; codexBefore: ProviderReading | null
   entry: DecisionEntry
 }
 
@@ -164,7 +165,15 @@ async function codexUsable($: EngineInterface, st: State, now: number): Promise<
   if (st.broken) return false
   if (st.avail && (st.avail.ok || now - st.avail.at < RECHECK_UNAVAILABLE_MS)) return st.avail.ok
   st.avail = { ok: await codexAvailable($), at: now }
+  // Missing or logged out: say so once (the slot the spawn-error toast shares), then every call runs on Claude.
+  if (!st.avail.ok) await toastOnce($, st)
   return st.avail.ok
+}
+
+async function toastOnce($: EngineInterface, st: State): Promise<void> {
+  if (st.toasted) return
+  st.toasted = true
+  await quietly(() => $.ui.toast('Balancer: Codex is not available, subagents run on Claude.'))
 }
 
 async function refreshCodex($: EngineInterface, st: State): Promise<void> {
@@ -208,8 +217,11 @@ async function observe($: EngineInterface, st: State, claudeIn?: ProviderReading
     if (st.opts.nudge) {
       const m = modeNow(st)
       const gap = claude && codex ? gapOf(claude, codex, now) : 0
-      // Ask whether Codex is usable only when it could change the state: a process check is not free.
-      const wanted = codex !== null && m !== 'off' && m !== 'claude' && (st.tight || gap > NUDGE_ENTER_GAP)
+      // Usable in the full sense, as routing sees it: not limited, below both ceilings, not cooling down (auto only, as in
+      // routing). The cheap checks come first: asking whether Codex is installed runs a process.
+      const open = codex !== null && m !== 'off' && m !== 'claude' && !codex.limitReached &&
+        ceilingHit(codex, now, st.opts.config) === null && !(m === 'auto' && now < st.cooldownUntil)
+      const wanted = open && (st.tight || gap > NUDGE_ENTER_GAP)
       const tight = nextTight(st.tight, gap, wanted && (await codexUsable($, st, now)))
       if (tight && !st.tight) st.armed = true
       if (!tight) st.armed = false
@@ -224,6 +236,16 @@ async function observe($: EngineInterface, st: State, claudeIn?: ProviderReading
 async function setRun($: EngineInterface, id: string | undefined, v: RowRun | null): Promise<void> {
   if (id === undefined) return
   await quietly(() => $.state.set({ plugin: 'balancer', key: 'runs', id }, v))
+}
+
+// A task reserved while others run, and each of those others, are marked: their usage deltas mix, so none of them may
+// teach the estimate, even one that starts and ends inside another.
+async function reserve($: EngineInterface, rec: Inflight, others: readonly Inflight[]): Promise<void> {
+  if (others.length > 0) {
+    for (const o of others) await addInflight($, { ...o, overlapped: true })
+    rec = { ...rec, overlapped: true }
+  }
+  await addInflight($, rec)
 }
 
 // ---------- decision log ----------
@@ -314,8 +336,8 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
       estimate, mode,
     }
     const agentId = d.route === 'codex' ? newAgentId() : undefined
-    if (agentId) await addInflight($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type })
-    return { d, entry, agentId, codex, estimate, overlapped: list.length > 0 }
+    if (agentId) await reserve($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type }, list)
+    return { d, entry, agentId, codex, estimate }
   })
 
   pushRecent(st.recent, picked.entry)
@@ -332,7 +354,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const task: Task = {
     agentId, sessionId, type, description: e.description, prompt: e.prompt, rowId: e.tool_use_id,
     cwd, sandbox, effort: effortFor(e.model, st.opts.effortMap), outFile: `${dd}/runs/${agentId}.last.txt`,
-    estimate: picked.estimate, codexBefore: picked.codex, overlappedStart: picked.overlapped, entry: picked.entry,
+    estimate: picked.estimate, codexBefore: picked.codex, entry: picked.entry,
   }
 
   await setRun($, task.rowId, { effort: task.effort, running: true })
@@ -373,6 +395,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   const git = c.sandbox === 'workspace-write'
   let run: CodexRun
   let before: string[] | null = null
+  let overlapped = false
   try {
     if (git) before = await gitSnapshot($, c.cwd)
     const built = buildCodexArgv({
@@ -384,7 +407,11 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
       cwd: c.cwd, timeoutMs: st.opts.taskTimeoutMs, signal,
     })
   } finally {
-    try { await removeInflight($, c.agentId) } catch { /* expires by age */ }
+    try {
+      // A task that started while another ran (or had another start under it) was marked when it reserved.
+      overlapped = ((await $.store.get(`inflight/${c.agentId}`)) as Partial<Inflight> | undefined)?.overlapped === true
+      await removeInflight($, c.agentId)
+    } catch { /* expires by age */ }
   }
 
   const now = await $.clock.now()
@@ -396,7 +423,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
       st.cache.put('codex', after, now)
       if (run.outcome !== 'aborted') {
         const others = (await listInflight($, now, st.opts.taskTimeoutMs)).length > 0
-        await saveEstimate($, c.type, updateEstimate(c.estimate, c.codexBefore, after, c.overlappedStart || others))
+        await saveEstimate($, c.type, updateEstimate(c.estimate, c.codexBefore, after, overlapped || others))
       }
     }
   }
@@ -407,10 +434,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   }
   if (run.outcome === 'spawn-error') {
     st.broken = true
-    if (!st.toasted) {
-      st.toasted = true
-      await $.ui.toast('Balancer: Codex is not available, subagents run on Claude.')
-    }
+    await toastOnce($, st)
   }
 
   c.entry.durationMs = run.durationMs
@@ -562,13 +586,13 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
     const codex = await codexReading($, st, now)
     const estimate = await loadEstimate($, type)
     const agentId = newAgentId()
-    await addInflight($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type })
+    await reserve($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type }, await listInflight($, now, st.opts.taskTimeoutMs))
     const entry: DecisionEntry = {
       t: now, session: sessionId, agentType: type, route: 'codex', reason: 'mode-codex',
       claudeAfter: Math.round(score(claude, now, st.opts.claudeCost) * 10) / 10,
       codexAfter: Math.round(score(codex, now, estimate) * 10) / 10, estimate, mode: modeNow(st),
     }
-    return { agentId, estimate, codex, entry, overlapped: (await listInflight($, now, st.opts.taskTimeoutMs)).length > 1 }
+    return { agentId, estimate, codex, entry }
   })
   if (!picked) return { text: 'Codex is not available (not installed or not logged in), so /codex cannot run.' }
 
@@ -576,7 +600,7 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
   const c: Task = {
     agentId, sessionId, type, description: '/codex', prompt: task, cwd, sandbox: 'workspace-write', effort: 'high',
     outFile: `${dd}/runs/${agentId}.last.txt`, estimate: picked.estimate, codexBefore: picked.codex,
-    overlappedStart: picked.overlapped, entry: picked.entry,
+    entry: picked.entry,
   }
   // Registered like a background run so that ending the session stops it.
   const ac = new AbortController()

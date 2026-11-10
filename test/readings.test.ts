@@ -85,6 +85,22 @@ test('dw7_rollout_keeps_only_rate_limits', () => {
   expect(Object.keys(r!).sort()).toEqual(READING_KEYS)
 })
 
+test('dw7_rollout_used_is_clamped_to_0_100_and_non_finite_windows_are_dropped', () => {
+  const rec = (used: string, mins: string) => tokenCount(rl({ used_percent: 'U', window_minutes: 'M', resets_at: 1 }, null))
+    .replace('"U"', used).replace('"M"', mins)
+  const read = (used: string, mins: string) => parseCodexRolloutTail(lines(cutRecord, rec(used, mins)), NOW)
+  expect(read('150', '300')?.fiveHour?.used).toBe(100)
+  expect(read('-5', '300')?.fiveHour?.used).toBe(0)
+  expect(read('42.5', '300')?.fiveHour?.used).toBe(42.5)
+  expect(read('1e999', '300')?.fiveHour).toBeNull() // Infinity
+  expect(read('10', '1e999')?.fiveHour).toBeNull()
+  expect(read('10', '1e999')?.sevenDay).toBeNull()
+  const app = (used: string, mins: string) => parseAppServerOutput(
+    lines(JSON.stringify({ id: 2, result: { rateLimits: { primary: { usedPercent: 'U', windowDurationMins: 'M', resetsAt: 1 } } } }).replace('"U"', used).replace('"M"', mins)), NOW)
+  expect(app('250', '10080')?.sevenDay?.used).toBe(100)
+  expect(app('1e999', '10080')?.sevenDay).toBeNull()
+})
+
 test('dw7_app_server_output', () => {
   const rateLimits = {
     primary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 1_800_500_000 },

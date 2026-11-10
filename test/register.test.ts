@@ -1,4 +1,5 @@
 import { test, expect } from 'claude-code/testing'
+import { createState, onAgent } from '../hooks/dispatch'
 import {
   CLAUDE_MARK, CODEX_AHEAD, CODEX_TEXT, CWD, DATA, H, NOW, PRD_74, SID,
   agent, inflightKeys, logLines, reading, rolloutFor, settleReal, startSession, world,
@@ -8,6 +9,7 @@ const OPTS = (o: Record<string, unknown>) => ({ options: o as any })
 // The engine stamps tool_use_id on the input; everything else must arrive as sent.
 const same = (got: any, sent: any) => expect(got).toEqual({ ...sent, tool_use_id: got.tool_use_id })
 const cmd = ($: any, args = '') => $.command.run({ command: 'balance', args })
+const sleep = (ms: number) => new Promise<void>(r => (globalThis as any).setTimeout(r, ms))
 
 // ---------- dw3: routed to Codex ----------
 
@@ -57,7 +59,9 @@ test('dw3_workspace_write_report_carries_git_status', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { git: ['', ' M done.py'] })
   const r: any = await $.tool.call(agent({ subagent_type: 'general-purpose' }) as any)
   expect(w.spawns[0]!.argv).toContain('workspace-write')
-  expect(r.result.content[0].text).toContain('M done.py')
+  const text: string = r.result.content[0].text
+  expect(text).toContain('Changed or untracked files (git status):\ndone.py')
+  expect(text).not.toMatch(/\bh:/) // no hash in the report
 })
 
 test('dw3_plan_mode_forces_a_read_only_sandbox', async ($, on) => {
@@ -520,4 +524,267 @@ test('dw2_no_codex_reading_routes_to_claude_and_refreshes_in_the_background', as
   const r: any = await $.tool.call(agent() as any)
   expect(r.result).toEqual(CLAUDE_MARK)
   expect(logLines(w).at(-1).reason).toBe('no-codex-reading')
+})
+
+// ---------- dw5: changed files are found by content, not by status code ----------
+
+const DIRTY = ' M a.py\n?? b.py'
+const GP = { subagent_type: 'general-purpose' }
+
+test('dw5_sync_failure_names_dirty_and_untracked_files_edited_during_the_run', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail', git: [DIRTY, DIRTY] }) // same status codes before and after
+  w.work.set('a.py', 'v1'); w.work.set('b.py', 'v1'); w.work.set('c.py', 'v1')
+  w.during = () => { w.work.set('a.py', 'v2'); w.work.set('b.py', 'v2') }
+  const r: any = await $.tool.call(agent(GP) as any)
+  expect(r.result.content[0].text).toContain('Files changed so far: a.py, b.py.')
+  expect(w.agentCalls).toHaveLength(0) // Claude does not re-run it
+})
+
+test('dw5_a_dirty_file_the_run_did_not_touch_is_not_reported', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail', git: [' M a.py\n M c.py', ' M a.py\n M c.py'] })
+  w.work.set('a.py', 'v1'); w.work.set('c.py', 'v1')
+  w.during = () => { w.work.set('a.py', 'v2') }
+  const r: any = await $.tool.call(agent(GP) as any)
+  const text: string = r.result.content[0].text
+  expect(text).toContain('Files changed so far: a.py.')
+  expect(text).not.toContain('c.py')
+})
+
+test('dw5_sync_failure_with_untouched_dirty_files_runs_on_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail', git: [DIRTY, DIRTY] })
+  w.work.set('a.py', 'v1'); w.work.set('b.py', 'v1')
+  const input = agent(GP)
+  const r: any = await $.tool.call(input as any)
+  expect(r.result).toEqual(CLAUDE_MARK)
+  same(w.agentCalls[0], input)
+})
+
+test('dw5_background_failure_with_edited_dirty_files_delivers_failure_text', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail', git: [DIRTY, DIRTY] })
+  w.work.set('a.py', 'v1'); w.work.set('b.py', 'v1')
+  w.during = () => { w.work.set('b.py', 'v2') }
+  await $.tool.call(agent({ ...GP, run_in_background: undefined }) as any)
+  await settleReal(() => w.submits.length > 0)
+  expect(w.submits[0]).toContain('Files changed so far: b.py.')
+  w.script = 'ok'
+  expect(((await $.tool.call(agent() as any)) as any).result.status).toBe('completed') // no cooldown
+})
+
+test('dw5_a_dirty_file_that_was_reverted_is_reported', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail', git: [' M a.py', ''] })
+  w.work.set('a.py', 'dirty')
+  const r: any = await $.tool.call(agent(GP) as any)
+  expect(r.result.content[0].text).toContain('Files changed so far: a.py.')
+  expect(w.agentCalls).toHaveLength(0)
+})
+
+// ---------- dw5: Codex missing or logged out at the pre-launch check ----------
+
+test('dw5_login_check_that_cannot_start_toasts_once_and_both_calls_run_on_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { loginThrows: true })
+  const a = agent(), b = agent()
+  const r1: any = await $.tool.call(a as any)
+  const r2: any = await $.tool.call(b as any)
+  expect(r1.result).toEqual(CLAUDE_MARK)
+  expect(r2.result).toEqual(CLAUDE_MARK)
+  same(w.agentCalls[0], a)
+  same(w.agentCalls[1], b)
+  expect(w.spawns).toHaveLength(0)
+  expect(w.toasts).toHaveLength(1)
+  expect(w.toasts[0]).toMatch(/Codex is not available/)
+})
+
+test('dw5_codex_logged_out_toasts_once_and_both_calls_run_on_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { loggedIn: false })
+  const r1: any = await $.tool.call(agent() as any)
+  const r2: any = await $.tool.call(agent() as any)
+  expect(r1.result).toEqual(CLAUDE_MARK)
+  expect(r2.result).toEqual(CLAUDE_MARK)
+  expect(w.spawns).toHaveLength(0)
+  expect(w.toasts).toHaveLength(1)
+  expect(logLines(w).at(-1).reason).toBe('codex-unavailable')
+})
+
+test('dw5_the_unavailable_toast_and_the_spawn_error_toast_share_one_slot', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'missing' })
+  await $.tool.call(agent() as any) // login ok, spawn fails: one toast
+  w.loggedIn = false
+  await $.tool.call(agent() as any)
+  expect(w.toasts).toHaveLength(1)
+})
+
+// ---------- dw6: foreground interrupt at hook level ----------
+
+// The kit cannot hand a hook a `next.signal` (it cannot abort a `$.tool.call`), and its `$` has no engine ops to call
+// `onAgent` with, so the hook is driven directly over a small hand-made `$`. Its spawned child hangs until `return()`
+// is called on the iterator, and takes 150 ms to exit: the reservation must outlive that.
+test('dw6_sync_abort_through_next_signal_kills_the_run_then_releases_and_answers_interrupted', async () => {
+  const store = new Map<string, unknown>(Object.entries(CODEX_AHEAD))
+  const files = new Map<string, string>()
+  const kept = () => [...store.keys()].filter(k => k.startsWith('inflight/'))
+  const seen = { cleaned: false, reservedAtExit: -1, returns: 0 }
+  let release!: () => void
+  const hung = new Promise<void>(r => { release = r })
+  let sent = false
+  const it = {
+    async next() {
+      if (!sent) { sent = true; return { done: false, value: { stream: 'stdout', text: '{"type":"thread.started","thread_id":"t-1"}\n' } } }
+      await hung
+      return { done: true, value: { code: null, signal: null } }
+    },
+    async return() {
+      seen.returns++
+      release()
+      await sleep(150)
+      seen.cleaned = true
+      seen.reservedAtExit = kept().length
+      return { done: true, value: undefined }
+    },
+  }
+  const gone = async () => { throw new Error('ENOENT') }
+  const $: any = {
+    session: { cwd: async () => CWD, root: async () => CWD, id: async () => SID, usage: async () => ({ rateLimits: [] }) },
+    fs: {
+      stat: async (p: string) => (p === CWD ? { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } : gone()),
+      read: async (p: string) => files.get(p) ?? gone(), write: async (p: string, t: string) => void files.set(p, t), list: gone,
+    },
+    store: {
+      get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => void store.set(k, v),
+      delete: async (k: string) => void store.delete(k), keys: async () => [...store.keys()],
+    },
+    clock: { now: async () => NOW },
+    env: { get: async (n: string) => ({ HOME: '/home/t', CLAUDE_CONFIG_DIR: '/cfg' } as Record<string, string>)[n] },
+    process: {
+      run: async (argv: string[]) => ({ exitCode: argv[0] === 'codex' ? 0 : 1, stdout: '', stderr: '' }),
+      spawn: () => ({ [Symbol.asyncIterator]: () => it }),
+    },
+    ui: { status: async () => {}, toast: async () => {} },
+    state: { set: async () => ({ isSet: true, version: 1 }) },
+    prompt: { submit: async () => ({}) },
+  }
+  const ac = new AbortController()
+  const next: any = Object.assign(async () => ({ result: CLAUDE_MARK }), { signal: ac.signal })
+  const p = onAgent($, createState({}), { ...agent(), tool_use_id: 'tu-1' } as any, next)
+  await settleReal(() => kept().length > 0 && sent)
+  expect(kept()).toHaveLength(1)
+  ac.abort()
+  const r: any = await p
+  expect(r).toEqual({ deny: 'Balancer: the Codex run was interrupted' })
+  expect(seen.returns).toBe(1)
+  expect(seen.cleaned).toBe(true) // the child was gone before the hook answered
+  expect(seen.reservedAtExit).toBe(1) // and the reservation was still held while it exited
+  expect(kept()).toEqual([])
+  expect(files.get('/cfg/plugins/data/balancer/decisions.jsonl')).toContain('"outcome":"aborted"')
+})
+
+// ---------- dw4: overlap rule for the estimate ----------
+
+test('dw4_a_task_that_starts_and_ends_inside_another_leaves_both_estimates_alone', async ($, on) => {
+  const seed = { fiveHour: 5, sevenDay: 1 }
+  const w = world(on, { ...CODEX_AHEAD, 'estimate/Explore': seed }, { script: 'gate', rollout: rolloutFor(15) })
+  const a: any = await $.tool.call(agent({ run_in_background: undefined }) as any) // A
+  expect(a.result.status).toBe('async_launched')
+  await settleReal(() => w.spawns.length > 0 && inflightKeys(w).length > 0)
+  await sleep(30) // A's stub has read its script
+  w.script = 'ok'
+  const b: any = await $.tool.call(agent() as any) // B starts and finishes while A runs
+  expect(b.result.status).toBe('completed')
+  expect(inflightKeys(w)).toHaveLength(1)
+  w.openGate() // A finishes with usage up by 10 points
+  await settleReal(() => w.submits.length > 0)
+  expect(w.submits).toHaveLength(1)
+  expect(inflightKeys(w)).toEqual([])
+  expect(w.store.get('estimate/Explore')).toEqual(seed)
+})
+
+// ---------- dw5: cooldown boundary ----------
+
+test('dw5_cooldown_ends_at_fifteen_minutes', OPTS({ staleAfterMinutes: 600 }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail' })
+  await $.tool.call(agent({ run_in_background: undefined }) as any)
+  await settleReal(() => w.submits.length > 0)
+  w.script = 'ok'
+  await w.clock.advance(15 * 60_000 - 1000)
+  const input = agent()
+  const r1: any = await $.tool.call(input as any)
+  expect(r1.result).toEqual(CLAUDE_MARK)
+  expect(logLines(w).at(-1).reason).toBe('codex-cooldown')
+  await w.clock.advance(1000) // expiry
+  const r2: any = await $.tool.call(agent() as any)
+  expect(r2.result.status).toBe('completed')
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'codex', reason: 'codex-ahead' })
+})
+
+// ---------- dw12: /balance ----------
+
+test('dw12_balance_shows_four_distinct_window_values_under_the_right_provider', async ($, on) => {
+  world(on, { 'reading/claude': reading({ fiveUsed: 11, sevenUsed: 22 }), 'reading/codex': reading({ fiveUsed: 33, sevenUsed: 44 }) })
+  const { text }: any = await cmd($)
+  const ls: string[] = text.split('\n')
+  const at = (head: RegExp) => ls.findIndex(l => head.test(l))
+  const c = at(/^Claude: score/), x = at(/^Codex: score/)
+  expect(c).toBeGreaterThanOrEqual(0)
+  expect(x).toBeGreaterThan(c)
+  expect(ls[c + 1]).toContain('5h 11% used')
+  expect(ls[c + 2]).toContain('7d 22% used')
+  expect(ls[x + 1]).toContain('5h 33% used')
+  expect(ls[x + 2]).toContain('7d 44% used')
+})
+
+const SEVEN_TYPES = ['t1', 't2', 't3', 't4', 't5', 't6', 't7']
+test('dw12_balance_lists_exactly_the_last_five_of_seven_unique_decisions', OPTS({ mode: 'claude', eligibleAgentTypes: SEVEN_TYPES.join(',') }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  for (const t of SEVEN_TYPES) {
+    await $.tool.call(agent({ subagent_type: t }) as any)
+    await w.clock.advance(1000) // a distinct time for each
+  }
+  const { text }: any = await cmd($)
+  const rows = text.split('\n').filter((l: string) => / -> /.test(l)).map((l: string) => l.trim().split(' ')[1])
+  expect(rows).toEqual(['t3', 't4', 't5', 't6', 't7'])
+  const times = text.split('\n').filter((l: string) => / -> /.test(l)).map((l: string) => l.trim().split(' ')[0])
+  expect(new Set(times).size).toBe(5)
+})
+
+// ---------- dw4, dw9: more eligibility ----------
+
+test('dw4_fork_stays_on_claude_even_when_listed_as_eligible', OPTS({ eligibleAgentTypes: 'Explore,fork' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  const input = agent({ subagent_type: 'fork' })
+  const r: any = await $.tool.call(input as any)
+  expect(r.result).toEqual(CLAUDE_MARK)
+  same(w.agentCalls[0], input)
+  expect(w.spawns).toHaveLength(0)
+})
+
+test('dw9_project_opt_out_also_holds_in_mode_codex', OPTS({ mode: 'codex' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(`${CWD}/.claude/balancer.json`, '{ "codex": false }')
+  const input = agent()
+  const r: any = await $.tool.call(input as any)
+  expect(r.result).toEqual(CLAUDE_MARK)
+  same(w.agentCalls[0], input)
+  expect(w.spawns).toHaveLength(0)
+})
+
+test('dw3_explicit_run_in_background_true_runs_in_the_background', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  const r: any = await $.tool.call(agent({ run_in_background: true }) as any)
+  expect(r.result.status).toBe('async_launched')
+  await settleReal(() => w.submits.length > 0)
+  expect(w.submits[0]).toContain(CODEX_TEXT)
+  expect(w.agentCalls).toHaveLength(0)
+})
+
+// ---------- dw11: a failed run is logged without text ----------
+
+test('dw11_a_failed_run_logs_no_prompt_description_or_failure_message', async ($, on) => {
+  const FAIL = 'FAILMSG-SECRET-99'
+  const w = world(on, CODEX_AHEAD, { script: 'fail', failMessage: FAIL, git: ['', ''] })
+  await $.tool.call(agent(GP) as any) // sync, falls back
+  await $.tool.call(agent({ ...GP, run_in_background: undefined }) as any) // a sync failure starts no cooldown
+  await settleReal(() => logLines(w).length >= 2)
+  const raw = w.files.get(`${DATA}/decisions.jsonl`)!
+  for (const secret of ['PROMPT-SECRET-77', 'DESC-SECRET-88', FAIL]) expect(raw).not.toContain(secret)
+  expect(logLines(w)).toHaveLength(2)
+  for (const l of logLines(w)) expect(l).toMatchObject({ route: 'codex', outcome: 'failed', exitCode: 1 })
 })

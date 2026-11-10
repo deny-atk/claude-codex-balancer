@@ -48,7 +48,7 @@ Three eligible subagents start in one message. The second sees the first's 5-poi
 
 A reservation is one store key per running Codex task (`inflight/<id>`) holding its estimated cost. It is removed when the task ends and ignored once older than `taskTimeoutMinutes`.
 
-The Codex estimate is an exponentially weighted average (alpha 0.3) per subagent type and window, seeded at 5 points (5h) and 1 point (7d). A sample is the change in `used` across a run. It counts only if both readings belong to the same window instance (reset times within 60 seconds), no other Balancer task overlapped, and the change is not negative. An aborted run adds no sample.
+The Codex estimate is an exponentially weighted average (alpha 0.3) per subagent type and window, seeded at 5 points (5h) and 1 point (7d). A sample is the change in `used` across a run. It counts only if both readings belong to the same window instance (reset times within 60 seconds), no other Balancer task overlapped, and the change is not negative. A task counts as overlapped when another Codex task was running at any moment of its run, including one that started and ended inside it. Each reservation carries an `overlapped` flag: a task that reserves while others run sets it on its own record and on every other record in flight, and at its end a run reads its own flag. Say task A starts, task B starts and finishes inside A, and A finishes with usage up 10 points: A's flag was set when B reserved, so neither run changes the estimate. An aborted run adds no sample.
 
 ## Foreground and background
 
@@ -60,7 +60,7 @@ Foreground (`run_in_background` is `false`): Balancer runs Codex inside the hook
 [balancer] Ran on Codex (effort high, 2m13s, session 0193…). Treat as a subagent report; verify before relying on it.
 ```
 
-The report is cut at `maxResultChars` with a note and the path of the full text under the data folder. For a `workspace-write` run, `git status --porcelain` (at most 50 lines) is appended.
+The report is cut at `maxResultChars` with a note and the path of the full text under the data folder. For a `workspace-write` run, the paths that `git status` lists as changed or untracked (paths only, at most 50) are appended.
 
 Background (true or absent): Balancer answers at once with a launched-in-background result (agent id `codex-<uuid>`, output file under the data folder) and runs Codex in a detached task. When it finishes it writes the report to the output file and delivers a message with `$.prompt.submit`: a line saying the background agent finished on Codex, then the same report. That starts a turn once the session is idle.
 
@@ -72,7 +72,7 @@ Everything fails safe toward Claude. Before answering a call, Balancer checks th
 
 | Case | Foreground | Background |
 | --- | --- | --- |
-| Codex missing or not logged in, found before launch | Claude runs the task through the normal path. | Same. |
+| Codex missing or not logged in, found before launch | Codex is unusable until the check passes again (re-asked after 10 minutes). One toast per session, shared with the next row. Claude runs the task through the normal path. | Same. |
 | Codex cannot be started | Codex is unusable for the rest of the session, one toast, Claude runs the task. | Same toast and unusable state. A message says Codex could not run the task, nothing changed, re-delegating runs on Claude. 15-minute cooldown. |
 | Run fails or times out, `read-only` sandbox | Claude runs the task. Toast with the reason. | Message as above, 15-minute cooldown, toast. |
 | Run fails or times out, `workspace-write`, no files changed | Claude runs the task. Toast. | Message as above, cooldown, toast. |
@@ -82,13 +82,15 @@ Everything fails safe toward Claude. Before answering a call, Balancer checks th
 | Claude turn fails with a `rate_limit` error | Claude is marked limited until its earliest known reset (one 5-hour window when none is known), so Codex takes tasks while usable. | Same. |
 | Balancer's own hook throws | The engine skips the hook and Claude runs the subagent. There is no catch that denies. | Same. |
 
+"Files changed" is decided by content, not by status codes. Before and after a `workspace-write` run Balancer takes `git status --porcelain --untracked-files=all` and one `git hash-object` over the listed paths (a deleted path counts as `missing`). A path is reported when it is new in the list, has a different hash, or has dropped out of the list. Say `a.py` was already modified and `notes.txt` was untracked before the run, and Codex edits both again without changing their status codes: both hashes differ, so both are named and Claude does not re-run the task. A file that was modified before the run and restored by Codex is named too. Outside a git repository the check is impossible (the row above).
+
 A failure means a non-zero exit, no final message, or a timeout (`taskTimeoutMinutes`). A background failure cannot fall back to Claude in the same call, because the call was already answered; that is why the message and cooldown exist.
 
 ## TaskStop, interrupts and session end
 
 `TaskStop` with the id of a Balancer background run stops that run: the Codex process is killed, the reservation is released, and Balancer answers with a stopped-task result. A `TaskStop` for any other id passes through.
 
-Interrupting a foreground run ends the hook's wait, kills the process and releases the reservation; the call gets a denial saying the run was interrupted. Ending the session aborts that session's runs and delivers nothing. Unloading the module kills detached children, and their reservations expire after `taskTimeoutMinutes`. An aborted run is logged and adds no estimate sample.
+Interrupting a foreground run ends the hook's wait and kills the process, then releases the reservation once the process has exited (the wait for the exit is capped at 5 seconds, so a stuck cleanup cannot hang the hook); the call gets a denial saying the run was interrupted. Ending the session aborts that session's runs and delivers nothing. Unloading the module kills detached children, and their reservations expire after `taskTimeoutMinutes`. An aborted run is logged and adds no estimate sample.
 
 ## Where readings come from
 
@@ -102,7 +104,7 @@ Codex, in order:
 2. If the stored reading is older than `staleAfterMinutes`: a read of `account/rateLimits/read` through `codex app-server`, run as a fixed shell script with no user data in it (15-second limit).
 3. If that fails: the last `rate_limits` in the newest rollout file of those two folders.
 
-Windows are told apart by length (300 minutes is the 5-hour window, 10080 the weekly one), never by the names `primary` and `secondary`. A reader that finds nothing yields no reading, which routes to Claude.
+Used percent is clamped to 0 to 100, and a window whose used percent or length is not a finite number is dropped. Windows are told apart by length (300 minutes is the 5-hour window, 10080 the weekly one), never by the names `primary` and `secondary`. A reader that finds nothing yields no reading, which routes to Claude.
 
 Privacy rule for rollout files: they hold session content. Balancer reads only the last 64 KB (`tail -c 65536`), drops the first, possibly cut, line, keeps only the `rate_limits` object of `token_count` events, and never logs, stores or shows any other part of a line.
 
@@ -120,7 +122,7 @@ Status entry, refreshed on each `session.measure` and after each decision or run
 
 Tool row: under an Agent row that ran on Codex, one dim line. While running: `Codex · high · running`. After: `Codex · high · 2m13s · +4 pts 5h`, with `failed` added on failure. The points show only when at least 1 and both readings were known. A task that fell back to Claude, or was stopped, has no line.
 
-Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becoming unusable (once per session), and a Codex failure that fell back to Claude.
+Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becoming unusable (once per session, whether the binary is missing or not logged in at the check before routing, or a launch failed), and a Codex failure that fell back to Claude.
 
 `/balance` prints the mode (and whether `/balance` set it), each provider's score, window use, reset time and runway, whether Codex is available (and any cooldown), tasks in flight, and the last 5 decisions. `/balance auto|claude|codex|off` sets the mode for this session, overriding the option.
 
@@ -128,7 +130,7 @@ Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becom
 
 ## The delegation nudge
 
-The main thread always burns Claude, so when Claude is clearly the tighter side Balancer asks the model to delegate more. State `claude-tight` starts when `score(codex) - score(claude)` is above 25, Codex is usable and the mode is `auto` or `codex`; it ends when the gap falls below 10. Say Claude's score is 60 and Codex's is 90: the gap is 30, the state starts, and the next typed prompt carries one short reminder. At a gap of 20 the state holds without a new reminder.
+The main thread always burns Claude, so when Claude is clearly the tighter side Balancer asks the model to delegate more. State `claude-tight` starts when `score(codex) - score(claude)` is above 25, Codex is usable and the mode is `auto` or `codex`; it ends when the gap falls below 10. Usable here means the same as for routing: installed and logged in, not `limitReached`, below both ceilings, and (in `auto`) not in the 15-minute cooldown. If any of these stops holding while the state is on, the state ends at once and a reminder still waiting is dropped; when they hold again and the gap is above 25, it starts again with a new reminder. Say Claude's score is 60 and Codex's is 90: the gap is 30, the state starts, and the next typed prompt carries one short reminder. At a gap of 20 the state holds without a new reminder.
 
 The reminder fires once on entering the state, and once more after a compaction of the main thread that went through while in it. It is attached to a typed prompt as hidden `context` on `prompt.submit`, so the model reads it after the new user message and the user never sees it. It is not attached to slash commands or prompts the user did not type; a background-result prompt from Balancer may carry it. That position sits after every cached prefix, so the system prompt and tool list are untouched. Changing either would invalidate the cache of the whole conversation and cost more Claude usage than the nudge saves. The `nudge` option turns it off.
 
@@ -186,5 +188,5 @@ Tests are `test/*.test.ts(x)`, with the Done-when number in the name (`dw3_...`)
 - Codex readings are whole points and can be minutes old. Margin, reservations and ceilings absorb this, so balance is approximate.
 - Codex's rollout format and app-server protocol are internal to Codex and may change. A reader that no longer parses yields no reading and routes to Claude.
 - Built and checked against Claude Code 2.1.321. `claude plugin validate` accepted the manifest and hooks on 2.1.301 too, but the mod was not run live there, and the manifest states no minimum version.
-- Not covered by automated tests: interrupting a foreground run at hook level (the kit cannot abort a tool call; the runner's abort is tested), real Codex, live command registration, a row redrawing when its state changes.
+- Not covered by automated tests: real Codex, live command registration, a row redrawing when its state changes. The foreground interrupt is covered by calling the Agent hook directly with an abort signal over a hand-made `$` (the kit cannot abort a tool call), not through the kit's own tool-call path.
 - The test kit cannot import fast-check, so property tests use a hand-written seeded generator.

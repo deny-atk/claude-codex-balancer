@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Cost, ProviderReading, WindowReading } from './policy'
 
 export type Provider = 'claude' | 'codex'
-export type Inflight = { id: string; sessionId: string; startedAt: number; cost: Cost; agentType: string }
+export type Inflight = { id: string; sessionId: string; startedAt: number; cost: Cost; agentType: string; overlapped?: boolean }
 
 const MIN_MS = 60_000
 const TAIL_BYTES = '65536'
@@ -15,10 +15,10 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
 
 // Windows are told apart by their length, never by the primary/secondary name.
 function assign(w: Windows, used: unknown, mins: unknown, resetsSec: unknown): void {
-  if (typeof used !== 'number' || typeof mins !== 'number') return
+  if (typeof used !== 'number' || typeof mins !== 'number' || !Number.isFinite(used) || !Number.isFinite(mins)) return
   const reading: WindowReading = {
-    used,
-    resetsAt: typeof resetsSec === 'number' ? resetsSec * 1000 : null,
+    used: Math.min(100, Math.max(0, used)),
+    resetsAt: typeof resetsSec === 'number' && Number.isFinite(resetsSec) ? resetsSec * 1000 : null,
     lengthMs: mins * MIN_MS,
   }
   if (mins === 300) w.fiveHour = reading

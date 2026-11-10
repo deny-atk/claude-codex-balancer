@@ -378,6 +378,44 @@ test('dw10_no_nudge_when_codex_is_not_usable_or_unread', async ($, on) => {
   expect(w.contexts.at(-1)).toBeUndefined()
 })
 
+// The state needs Codex usable in the full sense: not limited, below both ceilings, no cooldown.
+const entered = async ($: any, w: any, five = 40) => { await measure($, w, five, five); await submit($); return w.contexts.at(-1) }
+
+test('dw10_no_nudge_while_codex_is_limited_and_it_ends_when_codex_becomes_limited', async ($, on) => {
+  const w = world(on, { 'reading/codex': reading({ fiveUsed: 0, sevenUsed: 0, limit: true }) })
+  expect(await entered($, w)).toBeUndefined()
+  w.store.set('reading/codex', reading({ fiveUsed: 0, sevenUsed: 0 })) // limit lifted: enters
+  expect(await entered($, w)).toHaveLength(1)
+  w.store.set('reading/codex', reading({ fiveUsed: 0, sevenUsed: 0, limit: true })) // limited while in the state: leaves
+  expect(await entered($, w, 45)).toBeUndefined()
+  w.store.set('reading/codex', reading({ fiveUsed: 0, sevenUsed: 0 }))
+  expect(await entered($, w, 50)).toHaveLength(1) // a new entry, one more reminder
+})
+
+// Codex at 96% of the 5-hour window, resetting in 6 minutes: its runway is high, but it is at its ceiling.
+const CODEX_AT_CEILING = reading({ fiveUsed: 96, fiveLeft: 6 * 60_000, sevenUsed: 0 })
+
+test('dw10_no_nudge_while_codex_is_at_a_ceiling_and_it_ends_when_codex_reaches_one', async ($, on) => {
+  const w = world(on, { 'reading/codex': CODEX_AT_CEILING })
+  expect(await entered($, w)).toBeUndefined()
+  w.store.set('reading/codex', reading({ fiveUsed: 0, sevenUsed: 0 }))
+  expect(await entered($, w)).toHaveLength(1)
+  w.store.set('reading/codex', CODEX_AT_CEILING)
+  expect(await entered($, w, 45)).toBeUndefined()
+  w.store.set('reading/codex', reading({ fiveUsed: 0, sevenUsed: 0 }))
+  expect(await entered($, w, 50)).toHaveLength(1)
+})
+
+test('dw10_nudge_ends_during_a_cooldown_and_returns_after_it', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'fail' })
+  await startSession($)
+  await $.tool.call(agent({ run_in_background: undefined }) as any) // a decision to Codex enters the state
+  await settleReal(() => w.submits.length > 0) // the run failed: 15-minute cooldown
+  expect(await entered($, w, 80)).toBeUndefined() // cooling down: not usable, the waiting reminder is dropped
+  await w.clock.advance(16 * 60_000)
+  expect(await entered($, w, 80)).toHaveLength(1)
+})
+
 test('dw10_no_nudge_without_a_codex_reading', async ($, on) => {
   const w = world(on)
   await measure($, w, 40, 40)

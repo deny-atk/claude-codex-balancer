@@ -70,6 +70,11 @@ test('dw2_worked_case_two_goes_to_codex', () => {
   expect(Math.abs(d.claudeAfter - 66)).toBeLessThan(1)
 })
 
+test('dw2_mode_codex_with_no_codex_reading_still_goes_to_codex_when_usable', () => {
+  const d = decide(base({ mode: 'codex', codex: null, codexAvailable: true }))
+  expect([d.route, d.reason]).toEqual(['codex', 'mode-codex'])
+})
+
 const codexAhead = { claude: reading(w5(0, null), w7(88, 30)), codex: reading(w5(0, null), w7(46, 72)) }
 
 test('dw2_mode_off_forces_claude', () => {

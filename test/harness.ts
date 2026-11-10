@@ -18,7 +18,7 @@ export const THREAD = '01a1c5d7-d102-7d01-97b9-d84f9cb2db36'
 export const CLAUDE_MARK = { status: 'claude-ran' }
 export const CODEX_TEXT = 'CODEX-ANSWER-42'
 
-export type Script = 'ok' | 'fail' | 'limit' | 'missing' | 'hang'
+export type Script = 'ok' | 'fail' | 'limit' | 'missing' | 'hang' | 'gate'
 
 export type World = {
   store: Map<string, unknown>
@@ -32,9 +32,15 @@ export type World = {
   spawnFinally: number
   script: Script
   finalText: string
+  failMessage: string // message of the stub's turn.failed event
   cwdExists: boolean
   loggedIn: boolean
-  git: (string | null)[] // successive `git status --porcelain` stdouts; null = not a repository
+  loginThrows: boolean // `codex login status` cannot even start (binary missing)
+  work: Map<string, string> // file contents the stubbed `git hash-object` hashes, by path
+  during?: () => void // runs when a Codex process starts: a test edits `work` here
+  gate: Promise<void> // script 'gate': the run finishes once this resolves
+  openGate: () => void
+  git: (string | null)[] // successive `git status --porcelain --untracked-files=all` stdouts; null = not a repository
   rollout: string | null // tail of the rollout file for THREAD
   usage: { kind: string; percentUsed: number; resetsAt?: string }[]
   loginChecks: number
@@ -80,10 +86,12 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
-    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, cwdExists: true, loggedIn: true,
+    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, loggedIn: true, loginThrows: false, work: new Map(),
+    gate: undefined as any, openGate: () => {},
     git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
   }
+  w.gate = new Promise<void>(r => { w.openGate = r })
   w.clock = mock.clock(on, { now: NOW })
   mock.env(on, { HOME, CLAUDE_CONFIG_DIR: CFG })
 
@@ -117,7 +125,11 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
 
   on('process.run', (_$: any, e: any) => {
     const [a, b] = e.argv as string[]
-    if (a === 'codex' && b === 'login') { w.loginChecks++; return { value: { exitCode: w.loggedIn ? 0 : 1, stdout: '', stderr: '' } } }
+    if (a === 'codex' && b === 'login') { w.loginChecks++; if (w.loginThrows) throw new Error('spawn codex ENOENT'); return { value: { exitCode: w.loggedIn ? 0 : 1, stdout: '', stderr: '' } } }
+    if (a === 'git' && b === 'hash-object') {
+      const paths = (e.argv as string[]).slice((e.argv as string[]).indexOf('--') + 1)
+      return { value: { exitCode: 0, stdout: paths.map(p => 'h:' + (w.work.get(p) ?? '')).join('\n') + '\n', stderr: '' } }
+    }
     if (a === 'git') {
       const out = w.git.length > 1 ? w.git.shift()! : w.git[0]!
       return { value: { exitCode: out === null ? 128 : 0, stdout: out ?? '', stderr: '' } }
@@ -129,17 +141,19 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
 
   on('process.spawn', async function* (_$: any, e: any, next: any) {
     w.spawns.push({ argv: e.argv, cwd: e.cwd })
+    w.during?.()
     if (w.script === 'missing') throw new Error('spawn codex ENOENT')
     const ev = (o: unknown) => ({ stream: 'stdout', text: JSON.stringify(o) + '\n' })
     let code = 0
     try {
       yield ev({ type: 'thread.started', thread_id: THREAD })
       if (w.script === 'hang') await new Promise<void>(res => next.signal.addEventListener('abort', () => res(), { once: true }))
-      else if (w.script === 'ok') {
+      else if (w.script === 'ok' || w.script === 'gate') {
+        if (w.script === 'gate') await w.gate
         yield ev({ type: 'item.completed', item: { type: 'agent_message', text: w.finalText } })
         yield ev({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } })
       } else if (w.script === 'limit') { yield ev({ type: 'error', message: 'You have hit your usage limit' }); code = 1 }
-      else { yield ev({ type: 'turn.failed', error: { message: 'boom' } }); code = 1 }
+      else { yield ev({ type: 'turn.failed', error: { message: w.failMessage } }); code = 1 }
     } finally {
       w.spawnFinally++
     }

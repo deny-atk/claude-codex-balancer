@@ -209,7 +209,7 @@ test('dw5_run timeout kills the child', async () => {
 test('dw5_run timeout while the child is silent', async () => {
   const seen = { finally: false }
   const $ = fake$(async function* () {
-    try { await sleep(3000); yield { stream: 'stdout', text: 'x' } } finally { seen.finally = true }
+    try { await sleep(600); yield { stream: 'stdout', text: 'x' } } finally { seen.finally = true }
     return { code: 0, signal: null }
   })
   const t0 = Date.now()
@@ -240,26 +240,80 @@ test('dw6_run already-aborted signal', async () => {
   expect(r.outcome).toBe('aborted')
 })
 
+test('dw6_run resolves only after the child cleanup finished', async () => {
+  const seen = { cleaned: false }
+  const $ = fake$(async function* () {
+    try { for (;;) { await sleep(20); yield { stream: 'stdout', text: '{"type":"turn.started"}\n' } } }
+    finally { await sleep(300); seen.cleaned = true }
+    return { code: 0, signal: null }
+  })
+  const ac = new AbortController()
+  const p = runCodex($, { argv: ['codex'], cwd: '/w', timeoutMs: 60_000, signal: ac.signal })
+  await sleep(100)
+  ac.abort()
+  const r = await p
+  expect(r.outcome).toBe('aborted')
+  expect(seen.cleaned).toBe(true) // the reservation may be released only now
+})
+
+test('dw6_run does not hang on a cleanup that never finishes', async () => {
+  const $ = fake$(async function* () {
+    try { for (;;) { await sleep(20); yield { stream: 'stdout', text: '{"type":"turn.started"}\n' } } }
+    finally { await new Promise<void>(() => {}) }
+    return { code: 0, signal: null }
+  })
+  const ac = new AbortController()
+  const p = runCodex($, { argv: ['codex'], cwd: '/w', timeoutMs: 60_000, signal: ac.signal, cleanupMs: 200 })
+  await sleep(100)
+  ac.abort()
+  const t0 = Date.now()
+  expect((await p).outcome).toBe('aborted')
+  expect(Date.now() - t0).toBeLessThan(1500)
+})
+
 // ---------- git ----------
 
-test('dw5_gitSnapshot and changedSince', async () => {
-  let n = 0
+test('dw5_gitSnapshot hashes every listed path and changedSince compares content', async () => {
+  const calls: { argv: readonly string[]; init: any }[] = []
+  const status = ' M a.py\n?? b.py\nR  old.py -> new.py\n D gone.py\n?? "q\\"x.py"\n'
   const $ = fake$(undefined, async (argv, init) => {
-    expect(argv).toEqual(['git', 'status', '--porcelain'])
-    expect(init).toEqual({ cwd: '/w' })
-    return ++n === 1 ? { exitCode: 0, stdout: ' M a.py\n?? b.py\n', stderr: '' }
-      : { exitCode: 128, stdout: '', stderr: 'not a git repository' }
+    calls.push({ argv, init })
+    if (argv[1] === 'status') return calls.filter(c => c.argv[1] === 'status').length === 1
+      ? { exitCode: 0, stdout: status, stderr: '' } : { exitCode: 128, stdout: '', stderr: 'not a git repository' }
+    return { exitCode: 0, stdout: argv.slice(3).map(p => `H${p.length}`).join('\n') + '\n', stderr: '' }
   })
-  expect(await gitSnapshot($, '/w')).toEqual([' M a.py', '?? b.py'])
+  expect(await gitSnapshot($, '/w')).toEqual(['a.py\tH4', 'b.py\tH4', 'new.py\tH6', 'gone.py\tmissing', 'q"x.py\tH6'])
+  expect(calls[0]!.argv).toEqual(['git', 'status', '--porcelain', '--untracked-files=all'])
+  expect(calls[0]!.init).toEqual({ cwd: '/w' })
+  expect(calls[1]!.argv).toEqual(['git', 'hash-object', '--', 'a.py', 'b.py', 'new.py', 'q"x.py']) // the deleted path is not hashed
+  expect(calls[1]!.init).toEqual({ cwd: '/w' })
   expect(await gitSnapshot($, '/w')).toBeNull()
-  expect(changedSince([' M a.py'], [' M a.py', '?? b.py'])).toEqual(['?? b.py'])
-  expect(changedSince(null, ['x'])).toBeNull()
-  expect(changedSince(['x'], null)).toBeNull()
+})
+
+test('dw5_gitSnapshot with nothing listed runs no hash and a failed hash marks the path missing', async () => {
+  const runs: string[][] = []
+  const $ = fake$(undefined, async (argv) => {
+    runs.push([...argv])
+    if (argv[1] === 'status') return { exitCode: 0, stdout: runs.length === 1 ? '' : '?? ok.py\n?? dir\n', stderr: '' }
+    const paths = argv.slice(3)
+    return paths.includes('dir') ? { exitCode: 128, stdout: '', stderr: 'fatal' } : { exitCode: 0, stdout: 'HH\n', stderr: '' }
+  })
+  expect(await gitSnapshot($, '/w')).toEqual([])
+  expect(runs).toHaveLength(1)
+  expect(await gitSnapshot($, '/w')).toEqual(['ok.py\tHH', 'dir\tmissing']) // batch failed, then one path at a time
+})
+
+test('dw5_changedSince reports new, edited and vanished paths as plain paths', () => {
+  expect(changedSince(['a.py\t1', 'b.py\t1'], ['a.py\t2', 'b.py\t1', 'c.py\t1'])).toEqual(['a.py', 'c.py'])
+  expect(changedSince(['a.py\t1'], [])).toEqual(['a.py']) // a dirty file that was reverted
+  expect(changedSince(['a.py\t1', 'b.py\t2'], ['b.py\t2', 'a.py\t1'])).toEqual([])
+  expect(changedSince(null, ['x\t1'])).toBeNull()
+  expect(changedSince(['x\t1'], null)).toBeNull()
   expect(changedSince([], [])).toEqual([])
 })
 
 test('dw5_buildFailureText with and without changed files', () => {
-  const a = buildFailureText({ reason: 'limit reached', changedFiles: ['?? a.py', ' M b.py'], sandbox: 'workspace-write' })
+  const a = buildFailureText({ reason: 'limit reached', changedFiles: ['a.py', 'b.py'], sandbox: 'workspace-write' })
   expect(a).toContain('Codex stopped before finishing (limit reached). Files changed so far: ')
   expect(a).toContain('a.py')
   expect(a).toContain('b.py')
@@ -290,10 +344,11 @@ test('report: cap with note and path; git status limited to 50', () => {
   const uncut = buildReport({ finalMessage: 'short', effort: 'high', durationMs: 1000, maxResultChars: 100, fullTextPath: '/tmp/full.txt', sandbox: 'read-only' })
   expect(uncut).not.toContain('/tmp/full.txt')
 
-  const st = Array.from({ length: 80 }, (_, i) => `?? f${i}.txt`)
+  const st = Array.from({ length: 80 }, (_, i) => `f${i}.txt\tH${i}`)
   const w = buildReport({ finalMessage: 'done', effort: 'high', durationMs: 1000, maxResultChars: 100, gitStatus: st, sandbox: 'workspace-write' })
-  expect(w).toContain('git status --porcelain:')
+  expect(w).toContain('Changed or untracked files (git status):')
   expect(w).toContain('f49.txt')
+  expect(w).not.toContain('\tH') // the hashes stay out of the report
   expect(w).not.toContain('f50.txt')
   const ro = buildReport({ finalMessage: 'done', effort: 'high', durationMs: 1000, maxResultChars: 100, gitStatus: st, sandbox: 'read-only' })
   expect(ro).not.toContain('git status')
