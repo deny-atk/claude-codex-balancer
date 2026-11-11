@@ -186,7 +186,6 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('prompt.compose', () => { w.compose++; return { sections: SECTIONS } })
   on('prompt.submit', (_$: any, e: any) => { w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
   on('session.compact', (_$: any, e: any) => ({ messages: e.messages }))
-  on('classic.UserPromptSubmit', () => ({}))
   on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); return { result: CLAUDE_MARK } })
   on('tool.call', { tool: 'TaskStop' }, (_$: any, e: any) => { w.stopCalls.push(e); return { result: { message: 'claude-stop', task_id: e.task_id, task_type: 'x' } } })
   on('session.start', async (_$: any, e: any) => ({ cwd: e.cwd }))

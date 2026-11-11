@@ -1,7 +1,6 @@
 import type { Register } from 'claude-code'
 import {
   createState, onAgent, onBalance, onCodexCommand, onCompacted, onMeasure, onPromptSubmit, onRateLimitError, onSessionEnd, onTaskStop,
-  onUserPrompt,
 } from './dispatch'
 import { onToolRow } from './ui'
 
@@ -38,12 +37,6 @@ export const register: Register = (on, options) => {
   // PRD 8.5: a turn that ended in a Claude rate_limit error marks Claude as limited.
   on('classic.StopFailure', async ($, e, next) => {
     if (e.error === 'rate_limit') await onRateLimitError($, st)
-    return next(e)
-  })
-
-  // PRD 8.2 plan mode: the mode the prompt was submitted in.
-  on('classic.UserPromptSubmit', async (_$, e, next) => {
-    onUserPrompt(st, e)
     return next(e)
   })
 

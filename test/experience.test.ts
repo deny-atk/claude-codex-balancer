@@ -1,6 +1,7 @@
 // M2 (PRD 10, 9): status entry, toasts, /codex, delegation nudge, plan mode.
 import { test, expect } from 'claude-code/testing'
 import { formatRowLine, formatStatus, lastDecisions } from '../hooks/balance'
+import { register } from '../hooks/register'
 import {
   CODEX_AHEAD, CODEX_IDLE, CODEX_TEXT, CWD, DATA, H, NOW, SID, SECTIONS,
   agent, inflightKeys, logLines, measure, reading, rolloutFor, settleReal, startSession, world,
@@ -260,21 +261,17 @@ test('dw12_codex_command_missing_binary_marks_codex_unusable', async ($, on) => 
 
 // ---------- plan mode (closes the M1 gap) ----------
 
-const planMode = ($: any, mode: string) => $.classic.UserPromptSubmit({ prompt: 'x', permission_mode: mode })
-
-test('dw3_plan_mode_of_the_session_forces_a_read_only_sandbox', async ($, on) => {
-  const w = world(on, CODEX_AHEAD)
-  await planMode($, 'plan')
-  await $.tool.call(agent({ subagent_type: 'general-purpose' }) as any)
-  expect(w.spawns[0]!.argv).toContain('read-only')
-  await planMode($, 'default') // leaving plan mode lifts it
-  await $.tool.call(agent({ subagent_type: 'general-purpose' }) as any)
-  expect(w.spawns[1]!.argv).toContain('workspace-write')
+// A seated security plugin (cc-plugin-sec-default) sends classic events and prompt.attachment past user plugins,
+// so Balancer hooks neither: plan mode is seen only through the Agent call's own `mode`.
+test('dw15_register_hooks_no_classic_prompt_and_no_prompt_attachment', async () => {
+  const names: string[] = []
+  register(((name: string) => { names.push(name) }) as any, {} as any)
+  expect(names).not.toContain('classic.UserPromptSubmit')
+  expect(names).not.toContain('prompt.attachment')
 })
 
 test('dw3_the_agent_mode_argument_still_forces_read_only_outside_plan_mode', async ($, on) => {
   const w = world(on, CODEX_AHEAD)
-  await planMode($, 'default')
   await $.tool.call(agent({ subagent_type: 'general-purpose', mode: 'plan' }) as any)
   expect(w.spawns[0]!.argv).toContain('read-only')
 })

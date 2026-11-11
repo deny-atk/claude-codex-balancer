@@ -127,7 +127,6 @@ export function createState(options: PluginOptions) {
     cooldownUntil: 0,
     broken: false, // spawn failed: Codex is unusable for the rest of the session
     toasted: false,
-    permissionMode: undefined as string | undefined, // from the last UserPromptSubmit
     lastRoute: undefined as Provider | undefined,
     atCeiling: { claude: false, codex: false } as Record<Provider, boolean>,
     tight: false, // PRD 9 state claude-tight
@@ -323,8 +322,9 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const sessionId = await $.session.id()
   const cwd = await $.session.cwd() // before the reservation: nothing after it may throw before the run owns it
   const dd = await dataDir($, st)
-  // The hook cannot read the session's mode directly: the Agent argument, or the mode the last prompt was submitted in.
-  const planMode = (e as { mode?: string }).mode === 'plan' || st.permissionMode === 'plan'
+  // The hook cannot read the session's mode: only the Agent call's own argument. A seated security plugin
+  // (cc-plugin-sec-default) sends classic events and prompt.attachment past user plugins, so neither is hooked.
+  const planMode = (e as { mode?: string }).mode === 'plan'
 
   // Decide and reserve in one step: a second call starting now must see this call's reservation.
   const picked = await st.exclusive(async () => {
@@ -603,12 +603,7 @@ export async function onBalance($: EngineInterface, st: State, args: string): Pr
   }
 }
 
-// ---------- plan mode, nudge (PRD 9) ----------
-
-/** The permission mode a prompt was submitted in (classic UserPromptSubmit); a mode changed mid-turn is seen at the next prompt. */
-export function onUserPrompt(st: State, e: { permission_mode?: string }): void {
-  st.permissionMode = e.permission_mode
-}
+// ---------- nudge (PRD 9) ----------
 
 /** Attaches the armed reminder to a typed prompt, once. Not to a slash command or a prompt the person did not type. */
 export function onPromptSubmit(st: State, e: PromptSubmitInput, next: Next<'prompt.submit'>) {
