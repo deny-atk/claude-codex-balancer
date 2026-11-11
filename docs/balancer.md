@@ -180,7 +180,7 @@ Routing to Codex is on in every project. A brief sent to Codex goes to OpenAI, a
 
 ## Developing and checking
 
-Run the mod from the folder with `claude --plugin-dir <folder>`. The checks, from the repository root:
+Run the mod from the folder with `claude --plugin-dir <folder>`. A copy installed through a marketplace is a snapshot of the folder at install time, kept under its version. To bring a code change into installed sessions, raise `version` in `.claude-plugin/plugin.json`, run `claude plugin marketplace update <marketplace>` and `claude plugin update balancer@<marketplace>`, then restart the sessions. The checks, from the repository root:
 
 ```
 claude plugin validate .
