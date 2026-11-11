@@ -107,7 +107,9 @@ Interrupting a foreground run ends the hook's wait and kills the process, then r
 
 Both providers are reduced to one shape: used percent, reset time and length for each window, plus a read time and a limit flag. The readings are kept in the shared store (`reading/claude`, `reading/codex`), so every Claude Code session on the machine sees the freshest one. The Codex reading is also memoised in each session for 30 seconds.
 
-Claude: the live `$.session.usage()` figures (five-hour and seven-day windows only; spend limits are ignored), merged with the stored reading. Each `session.measure` saves the live reading. A stored limit flag, set by a `rate_limit` error, is carried over until its reset. Per-model weekly caps are not visible, so Balancer learns of one only from such an error.
+Claude: the live `$.session.usage()` figures (five-hour and seven-day windows only; spend limits are ignored), merged with the stored reading. Each `session.measure` saves the live reading; Claude's limit is read from these usage windows. A limit flag stored by an older version is carried over until its reset. Per-model weekly caps are not visible.
+
+Balancer hooks none of the events intercepted by the built-in security plugin.
 
 Codex, in order:
 
@@ -143,7 +145,7 @@ Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becom
 
 The main thread always burns Claude, so when Claude is clearly the tighter side Balancer asks the model to delegate more. State `claude-tight` starts when `score(codex) - score(claude)` is above 25, Codex is usable and the mode is `auto` or `codex`; it ends when the gap falls below 10. Usable here means the same as for routing: installed and logged in, not `limitReached`, below both ceilings, and (in `auto`) not in the 15-minute cooldown. If any of these stops holding while the state is on, the state ends at once and a reminder still waiting is dropped; when they hold again and the gap is above 25, it starts again with a new reminder. Say Claude's score is 60 and Codex's is 90: the gap is 30, the state starts, and the next typed prompt carries one short reminder. At a gap of 20 the state holds without a new reminder.
 
-The reminder fires once on entering the state, and once more after a compaction of the main thread that went through while in it. It is attached to a typed prompt as hidden `context` on `prompt.submit`, so the model reads it after the new user message and the user never sees it. It is not attached to slash commands or prompts the user did not type; a background-result prompt from Balancer may carry it. That position sits after every cached prefix, so the system prompt and tool list are untouched. Changing either would invalidate the cache of the whole conversation and cost more Claude usage than the nudge saves. The `nudge` option turns it off.
+The reminder fires once on entering the state. It is re-armed when a usage measurement shows the main context dropped by more than half after having been at least 20% full; after a manual `/compact`, it therefore rides on the first typed prompt after the next model response. It is attached to a typed prompt as hidden `context` on `prompt.submit`, so the model reads it after the new user message and the user never sees it. It is not attached to slash commands or prompts the user did not type; a background-result prompt from Balancer may carry it. That position sits after every cached prefix, so the system prompt and tool list are untouched. Changing either would invalidate the cache of the whole conversation and cost more Claude usage than the nudge saves. The `nudge` option turns it off.
 
 ## Configuration
 

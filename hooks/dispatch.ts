@@ -1,5 +1,5 @@
 // Agent routing and execution (PRD 8, decisions D1). All state is per load (one closure), so tests do not share it.
-import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionCompactInput, SessionCompactResult, ToolCallInput } from 'claude-code'
+import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionMeasureInput, ToolCallInput } from 'claude-code'
 import {
   appendCapped, ceilingHit, ceilingText, CODEX_USAGE, dataDirFor, formatBalance, formatStatus, gapOf, lastDecisions, NUDGE_ENTER_GAP, NUDGE_TEXT,
   nextTight, parseBalanceArgs, pushRecent, USAGE_LINE,
@@ -10,7 +10,7 @@ import {
   codexModelFor, effortFor, gitSnapshot, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
-import { decide, score, updateEstimate, FIVE_HOUR_MS } from './policy'
+import { decide, score, updateEstimate } from './policy'
 import type { Cost, Decision, Mode, PolicyConfig, ProviderReading } from './policy'
 import type { Inflight } from './readings'
 import {
@@ -67,18 +67,6 @@ const serial = () => {
 
 const emptyReading = (now: number): ProviderReading => ({ fiveHour: null, sevenDay: null, readAt: now, limitReached: false })
 
-// PRD 8.5: a limit stays until the earliest known reset.
-// shortcut: a limit with no known reset time is assumed to last one 5-hour window; replace if a reset time becomes available.
-function limited(base: ProviderReading, now: number): ProviderReading {
-  const known = [base.fiveHour?.resetsAt, base.sevenDay?.resetsAt].some(t => typeof t === 'number')
-  return {
-    ...base,
-    ...(known ? {} : { fiveHour: { used: base.fiveHour?.used ?? 100, resetsAt: now + FIVE_HOUR_MS, lengthMs: FIVE_HOUR_MS } }),
-    readAt: now,
-    limitReached: true,
-  }
-}
-
 function deltaOf(b: ProviderReading | null, a: ProviderReading | null): Cost | undefined {
   if (!b || !a) return undefined
   const one = (x: ProviderReading['fiveHour'], y: ProviderReading['fiveHour']) =>
@@ -131,6 +119,7 @@ export function createState(options: PluginOptions) {
     atCeiling: { claude: false, codex: false } as Record<Provider, boolean>,
     tight: false, // PRD 9 state claude-tight
     armed: false, // one reminder waits for the next prompt
+    lastContextTokens: undefined as number | undefined,
     avail: undefined as { ok: boolean; at: number } | undefined,
     refreshing: false,
     dir: undefined as string | undefined,
@@ -146,8 +135,7 @@ async function dataDir($: EngineInterface, st: State): Promise<string> {
 
 // ---------- readings ----------
 
-// The live Claude reading is stamped `now`, so pickFresher always takes it; a stored limit
-// (PRD 8.5, set by a rate_limit error) must therefore be carried over by hand.
+// Preserve a previously stored limit until its reset, including readings saved by older versions.
 function mergeClaude(stored: ProviderReading | null, live: ProviderReading | null, now: number): ProviderReading | null {
   const s = stored ? expireLimit(stored, now) : null
   const picked = pickFresher(s, live)
@@ -566,23 +554,18 @@ export async function onSessionEnd($: EngineInterface, st: State, e: { sessionId
   await Promise.allSettled(mine.map(r => r.done))
 }
 
-export async function onMeasure($: EngineInterface, st: State, e: { rateLimits: Parameters<typeof claudeFromUsage>[0] }) {
+export async function onMeasure($: EngineInterface, st: State, e: SessionMeasureInput) {
+  const { tokens, window } = e.context
+  if (tokens !== undefined) {
+    if (st.tight && st.lastContextTokens !== undefined && st.lastContextTokens >= window * 0.2 && tokens < st.lastContextTokens / 2) st.armed = true
+    st.lastContextTokens = tokens
+  }
   const now = await $.clock.now()
   const live = claudeFromUsage(e.rateLimits, now)
   const stored = await loadReading($, 'claude')
   const merged = live ? (mergeClaude(stored, live, now) ?? live) : mergeClaude(stored, null, now)
   if (live) await saveReading($, 'claude', merged ?? live)
   await observe($, st, merged)
-}
-
-export async function onRateLimitError($: EngineInterface, st: State) {
-  try {
-    const now = await $.clock.now()
-    const base = (await claudeReading($, st, now)) ?? emptyReading(now)
-    await saveReading($, 'claude', limited(base, now))
-  } catch {
-    // nothing to record
-  }
 }
 
 export async function onBalance($: EngineInterface, st: State, args: string): Promise<{ text: string }> {
@@ -610,11 +593,6 @@ export function onPromptSubmit(st: State, e: PromptSubmitInput, next: Next<'prom
   if (!st.tight || !st.armed || e.command || e.isMeta) return next(e)
   st.armed = false
   return next({ ...e, context: [...(e.context ?? []), NUDGE_TEXT] })
-}
-
-/** A compaction that went through, while in claude-tight, arms the reminder again. Subagent and precompute runs do not count. */
-export function onCompacted(st: State, e: SessionCompactInput, r: SessionCompactResult): void {
-  if (st.tight && e.agentId === undefined && e.trigger !== 'precompute' && r.messages !== undefined) st.armed = true
 }
 
 // ---------- /codex <task> (PRD 10) ----------

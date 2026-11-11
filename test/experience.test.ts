@@ -13,7 +13,9 @@ const codexCmd = ($: any, args = '') => $.command.run({ command: 'codex', args }
 const submit = ($: any, extra: Record<string, unknown> = {}) => $.prompt.submit({ text: 'hello', ...extra })
 const NUDGE = /second subscription/
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: ['Agent'], outputStyle: null, traits: [] }
-const MSGS = [{ role: 'user', text: 'earlier', toolUses: [] }]
+const contextMeasure = ($: any, tokens?: number) => $.session.measure({
+  context: { tokens, window: 1000 }, rateLimits: [], changed: ['context'],
+})
 
 for (const fallback of ['', 'gpt-command']) {
   test(`dw2_codex_command_uses_only_codex_model_${fallback || 'empty'}`, OPTS({ codexModel: fallback, modelMap: 'default=gpt-mapped' }), async ($, on) => {
@@ -354,38 +356,46 @@ test('dw10_slash_command_and_meta_prompts_never_get_the_nudge', async ($, on) =>
   expect(w.contexts.at(-1)).toHaveLength(1)
 })
 
-test('dw10_compaction_while_tight_arms_one_more', async ($, on) => {
+test('dw16_context_drop_while_tight_arms_one_more', async ($, on) => {
   const w = world(on, CODEX_IDLE)
   await measure($, w, 40, 40)
   await submit($)
-  await submit($)
-  expect(w.contexts.at(-1)).toBeUndefined()
-  await ($ as any).session.compact({ trigger: 'auto', messages: MSGS })
+  await contextMeasure($, 600)
+  await contextMeasure($) // missing tokens must not erase the previous measurement
+  await contextMeasure($, 100)
   await submit($)
   expect(w.contexts.at(-1)).toHaveLength(1)
   await submit($)
   expect(w.contexts.at(-1)).toBeUndefined()
 })
 
-test('dw10_compaction_outside_the_state_or_by_a_subagent_or_precompute_arms_nothing', async ($, on) => {
+for (const [name, before, after] of [['half', 600, 300], ['under_twenty_percent', 199, 10]] as const) {
+  test(`dw16_context_drop_${name}_does_not_arm`, async ($, on) => {
+    const w = world(on, CODEX_IDLE)
+    await measure($, w, 40, 40)
+    await submit($)
+    await contextMeasure($, before)
+    await contextMeasure($, after)
+    await submit($)
+    expect(w.contexts.at(-1)).toBeUndefined()
+  })
+}
+
+test('dw16_context_drop_outside_tight_does_not_arm', async ($, on) => {
   const w = world(on, CODEX_IDLE)
-  await measure($, w, 5, 5) // not tight
-  await ($ as any).session.compact({ trigger: 'manual', messages: MSGS })
-  await submit($)
-  expect(w.contexts.at(-1)).toBeUndefined()
-  await measure($, w, 40, 40)
-  await submit($) // consume the entry's reminder
-  await ($ as any).session.compact({ trigger: 'precompute', messages: MSGS })
-  await ($ as any).session.compact({ trigger: 'auto', agentId: 'sub-1', messages: MSGS })
+  await measure($, w, 5, 5)
+  await contextMeasure($, 600)
+  await contextMeasure($, 100)
   await submit($)
   expect(w.contexts.at(-1)).toBeUndefined()
 })
 
-test('dw10_nudge_option_false_never_attaches', OPTS({ nudge: false }), async ($, on) => {
+test('dw16_nudge_option_false_never_attaches_after_context_drop', OPTS({ nudge: false }), async ($, on) => {
   const w = world(on, CODEX_IDLE)
   await measure($, w, 40, 40)
   await submit($)
-  await ($ as any).session.compact({ trigger: 'auto', messages: MSGS })
+  await contextMeasure($, 600)
+  await contextMeasure($, 100)
   await submit($)
   expect(w.contexts).toEqual([undefined, undefined])
 })
@@ -476,4 +486,16 @@ test('dw11_log_stays_content_free_with_the_command', async ($, on) => {
   const text = w.files.get(`${DATA}/decisions.jsonl`) ?? ''
   expect(text).not.toContain('COMMAND-SECRET-99')
   expect(text).not.toContain(CODEX_TEXT)
+})
+
+test('dw16_hooks_exclude_security_intercepted_events', () => {
+  const names: string[] = []
+  register(((name: string) => { names.push(name) }) as any, {} as any)
+  const intercepted = [
+    'prompt.section', 'prompt.context', 'prompt.attachment', 'prompt.compose', 'skill.prompt',
+    'attribution.text', 'session.append', 'session.compact', 'settings.read', 'tool.describe',
+    'command.describe', 'agent.offer', 'agent.spawn', 'tool.register', 'tool.list', 'tool.check',
+    'ui.log', 'env.get', 'env.set', 'plugin.register',
+  ]
+  expect(names.filter(name => name.startsWith('classic.') || intercepted.includes(name))).toEqual([])
 })

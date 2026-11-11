@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 import {
-  createState, onAgent, onBalance, onCodexCommand, onCompacted, onMeasure, onPromptSubmit, onRateLimitError, onSessionEnd, onTaskStop,
+  createState, onAgent, onBalance, onCodexCommand, onMeasure, onPromptSubmit, onSessionEnd, onTaskStop,
 } from './dispatch'
 import { onToolRow } from './ui'
 
@@ -34,20 +34,8 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // PRD 8.5: a turn that ended in a Claude rate_limit error marks Claude as limited.
-  on('classic.StopFailure', async ($, e, next) => {
-    if (e.error === 'rate_limit') await onRateLimitError($, st)
-    return next(e)
-  })
-
   // PRD 9: the delegation nudge rides on a typed prompt as hidden context, never on the system prompt.
   on('prompt.submit', (_$, e, next) => onPromptSubmit(st, e, next))
-
-  on('session.compact', async (_$, e, next) => {
-    const r = await next(e)
-    onCompacted(st, e, r)
-    return r
-  })
 
   // PRD 10: a Codex run adds one line under its Agent row.
   on('ui.render', { component: 'ToolUse' }, ($, e, next) => onToolRow($, e, next))

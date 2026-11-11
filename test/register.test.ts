@@ -2,7 +2,7 @@ import { test, expect } from 'claude-code/testing'
 import { createState, onAgent } from '../hooks/dispatch'
 import {
   CLAUDE_MARK, CODEX_AHEAD, CODEX_TEXT, CWD, DATA, H, NOW, PRD_74, SID,
-  agent, THREAD, inflightKeys, logLines, reading, rolloutFor, settleReal, startSession, world,
+  agent, THREAD, inflightKeys, logLines, measure, reading, rolloutFor, settleReal, startSession, world,
 } from './harness'
 
 const OPTS = (o: Record<string, unknown>) => ({ options: o as any })
@@ -302,22 +302,16 @@ test('dw5_background_failure_with_changed_files_delivers_failure_text_and_no_coo
   expect(r2.result.status).toBe('completed') // no cooldown
 })
 
-test('dw5_claude_rate_limit_error_marks_claude_limited', async ($, on) => {
+test('dw16_claude_five_hour_ceiling_from_measure_routes_to_codex', async ($, on) => {
   const w = world(on, {
     'reading/claude': reading({ fiveUsed: 10, sevenUsed: 10 }),
     'reading/codex': reading({ fiveUsed: 10, sevenUsed: 10 }),
   })
-  await $.tool.call(agent() as any)
-  expect(logLines(w).at(-1).reason).toBe('claude-ahead') // equal readings stay on Claude
-  await ($ as any).classic.StopFailure({ error: 'rate_limit' })
-  expect((w.store.get('reading/claude') as any).limitReached).toBe(true)
+  await measure($, w, 100, 10)
   const r: any = await $.tool.call(agent() as any)
   expect(r.result.status).toBe('completed')
+  expect(w.spawns).toHaveLength(1)
   expect(logLines(w).at(-1).reason).toBe('claude-ceiling')
-  // another kind of error changes nothing
-  w.store.set('reading/claude', reading({ fiveUsed: 10, sevenUsed: 10 }))
-  await ($ as any).classic.StopFailure({ error: 'overloaded' })
-  expect((w.store.get('reading/claude') as any).limitReached).toBe(false)
 })
 
 // ---------- dw6: stopping a background run ----------
