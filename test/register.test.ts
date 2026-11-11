@@ -11,6 +11,54 @@ const same = (got: any, sent: any) => expect(got).toEqual({ ...sent, tool_use_id
 const cmd = ($: any, args = '') => $.command.run({ command: 'balance', args })
 const sleep = (ms: number) => new Promise<void>(r => (globalThis as any).setTimeout(r, ms))
 
+for (const [model, expected] of [['opus', 'gpt-6.1-sol'], ['sonnet', 'gpt-6.1-terra']]) {
+  test(`dw1_model_map_default_${model}`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    await $.tool.call(agent({ model }) as any)
+    const argv = w.spawns[0]!.argv
+    expect(argv[argv.indexOf('-m') + 1]).toBe(expected)
+  })
+}
+
+for (const model of ['haiku', undefined]) {
+  for (const fallback of ['', 'gpt-fallback']) {
+    test(`dw2_unmapped_${model ?? 'omitted'}_${fallback || 'empty'}`, OPTS({ codexModel: fallback }), async ($, on) => {
+      const w = world(on, CODEX_AHEAD)
+      await $.tool.call(agent({ model }) as any)
+      const argv = w.spawns[0]!.argv
+      if (fallback) expect(argv[argv.indexOf('-m') + 1]).toBe(fallback)
+      else expect(argv).not.toContain('-m')
+    })
+  }
+}
+
+test('dw3_model_map_overrides_codex_model', OPTS({ modelMap: 'opus=gpt-mapped', codexModel: 'gpt-fallback' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  await $.tool.call(agent({ model: 'opus' }) as any)
+  const argv = w.spawns[0]!.argv
+  expect(argv[argv.indexOf('-m') + 1]).toBe('gpt-mapped')
+})
+
+for (const [name, modelMap] of [['missing_equals', 'opus'], ['empty_parts', ',,=x,sonnet='], ['empty', '']]) {
+  test(`dw4_malformed_model_map_${name}`, OPTS({ modelMap, codexModel: 'gpt-fallback' }), async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    const r: any = await $.tool.call(agent({ model: 'sonnet' }) as any)
+    expect(r.result.status).toBe('completed')
+    const argv = w.spawns[0]!.argv
+    expect(argv[argv.indexOf('-m') + 1]).toBe('gpt-fallback')
+    expect(logLines(w)[0].codexModel).toBe('gpt-fallback')
+  })
+}
+
+for (const [model, expected] of [['sonnet', 'gpt-6.1-terra'], ['haiku', 'default']]) {
+  test(`dw5_model_in_decision_and_report_${expected}`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    const r: any = await $.tool.call(agent({ model }) as any)
+    expect(logLines(w)[0].codexModel).toBe(expected)
+    expect(r.result.content[0].text).toContain(`Ran on Codex (model ${expected}, effort`)
+  })
+}
+
 // ---------- dw3: routed to Codex ----------
 
 test('dw3_sync_codex_answers_in_place', async ($, on) => {
@@ -18,7 +66,7 @@ test('dw3_sync_codex_answers_in_place', async ($, on) => {
   const r: any = await $.tool.call(agent() as any)
   expect(r.result.status).toBe('completed')
   const text: string = r.result.content[0].text
-  expect(text).toStartWith('[balancer] Ran on Codex (effort high')
+  expect(text).toStartWith('[balancer] Ran on Codex (model default, effort high')
   expect(text).toContain(CODEX_TEXT)
   expect(w.agentCalls).toHaveLength(0) // the Claude subagent never started
   expect(w.spawns).toHaveLength(1)
@@ -404,7 +452,7 @@ test('dw11_log_lines_hold_no_prompt_description_or_report_text', async ($, on) =
   expect(ls).toHaveLength(2)
   expect(ls[0]).toMatchObject({ t: NOW, session: SID, agentType: 'Explore', route: 'codex', reason: 'codex-ahead', mode: 'auto', outcome: 'ok', exitCode: 0 })
   expect(Object.keys(ls[0]).sort()).toEqual(
-    ['agentType', 'claudeAfter', 'codexAfter', 'durationMs', 'estimate', 'exitCode', 'mode', 'outcome', 'reason', 'route', 'session', 't'])
+    ['agentType', 'claudeAfter', 'codexAfter', 'codexModel', 'durationMs', 'estimate', 'exitCode', 'mode', 'outcome', 'reason', 'route', 'session', 't'])
   expect(ls[1]).toMatchObject({ route: 'claude', reason: 'mode-claude', mode: 'claude' })
 })
 

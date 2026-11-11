@@ -14,6 +14,18 @@ const NUDGE = /second subscription/
 const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: ['Agent'], outputStyle: null, traits: [] }
 const MSGS = [{ role: 'user', text: 'earlier', toolUses: [] }]
 
+for (const fallback of ['', 'gpt-command']) {
+  test(`dw2_codex_command_uses_only_codex_model_${fallback || 'empty'}`, OPTS({ codexModel: fallback, modelMap: 'default=gpt-mapped' }), async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    const r: any = await codexCmd($, 'synthetic task')
+    const argv = w.spawns[0]!.argv
+    if (fallback) expect(argv[argv.indexOf('-m') + 1]).toBe(fallback)
+    else expect(argv).not.toContain('-m')
+    expect(logLines(w)[0].codexModel).toBe(fallback || 'default')
+    expect(r.text).toContain(`Ran on Codex (model ${fallback || 'default'}, effort high`)
+  })
+}
+
 test('dw13_last_decisions_keeps_the_last_valid_lines_and_skips_bad_ones', () => {
   const l = (n: number) => JSON.stringify({ t: n, agentType: 'a', route: 'claude', reason: 'r' })
   const text = [l(1), l(2), '{broken', '', '"str"', l(3), l(4)].join('\n') + '\n'
@@ -37,7 +49,9 @@ test('status_formatter_counts_a_passed_reset_as_zero_used', () => {
   expect(formatStatus({ now: NOW, claude: old, codex: null, last: undefined })).toStartWith('C 5h 0 · 7d 10')
 })
 
-test('status_row_line_formatter', () => {
+test('dw5_row_line_with_model_and_legacy_without_model', () => {
+  expect(formatRowLine({ model: 'gpt-6.1-terra', effort: 'medium', running: false, durationMs: 25_000 })).toBe('Codex · gpt-6.1-terra · medium · 25s')
+  expect(formatRowLine({ model: 'default', effort: 'high', running: true })).toBe('Codex · default · high · running')
   expect(formatRowLine({ effort: 'high', running: true })).toBe('Codex · high · running')
   expect(formatRowLine({ effort: 'high', running: false, durationMs: 133_000, delta5h: 4.2 })).toBe('Codex · high · 2m13s · +4 pts 5h')
   expect(formatRowLine({ effort: 'low', running: false, durationMs: 9_000 })).toBe('Codex · low · 9s')
@@ -157,7 +171,7 @@ test('dw12_codex_command_is_registered_at_session_start', async ($, on) => {
 test('dw12_codex_command_runs_the_task_and_returns_the_report_without_a_model_call', async ($, on) => {
   const w = world(on, { ...CODEX_AHEAD, 'estimate/command': { fiveHour: 5, sevenDay: 1 } }, { rollout: rolloutFor(15) })
   const r: any = await codexCmd($, 'find the flaky test')
-  expect(r.text).toStartWith('[balancer] Ran on Codex (effort high')
+  expect(r.text).toStartWith('[balancer] Ran on Codex (model default, effort high')
   expect(r.text).toContain(CODEX_TEXT)
   expect(w.modelCalls).toEqual([])
   expect(w.agentCalls).toHaveLength(0)

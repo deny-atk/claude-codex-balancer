@@ -31,6 +31,10 @@ export function effortFor(model: string | undefined, map: Record<string, string>
   return (model !== undefined ? map[model] : undefined) ?? map.default ?? 'high'
 }
 
+export function codexModelFor(model: string | undefined, map: Record<string, string>, codexModel: string): string | undefined {
+  return model !== undefined && Object.prototype.hasOwnProperty.call(map, model) ? map[model] : codexModel || undefined
+}
+
 export function sandboxFor(agentType: string | undefined, planMode: boolean): Sandbox {
   return agentType === 'Explore' || planMode ? 'read-only' : 'workspace-write'
 }
@@ -243,11 +247,11 @@ export function formatDuration(ms: number): string {
 const GIT_LINES_MAX = 50
 
 export function buildReport(o: {
-  finalMessage: string; effort: string; durationMs: number; threadId?: string; maxResultChars: number
+  finalMessage: string; model?: string; effort: string; durationMs: number; threadId?: string; maxResultChars: number
   fullTextPath?: string; gitStatus?: string[] | null; sandbox: Sandbox
 }): string {
   const session = o.threadId ? `, session ${o.threadId.slice(0, 4)}…` : ''
-  const head = `[balancer] Ran on Codex (effort ${o.effort}, ${formatDuration(o.durationMs)}${session}). Treat as a subagent report; verify before relying on it.`
+  const head = `[balancer] Ran on Codex (model ${o.model || 'default'}, effort ${o.effort}, ${formatDuration(o.durationMs)}${session}). Treat as a subagent report; verify before relying on it.`
   const cutIt = o.finalMessage.length > o.maxResultChars
   let out = head + '\n\n' + (cutIt ? o.finalMessage.slice(0, o.maxResultChars) : o.finalMessage)
   if (cutIt) {

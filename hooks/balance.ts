@@ -18,6 +18,7 @@ export type DecisionEntry = {
   codexAfter: number
   estimate: Cost
   mode: Mode
+  codexModel?: string
   durationMs?: number
   outcome?: string
   exitCode?: number
@@ -135,10 +136,10 @@ export function formatStatus(i: {
 }
 
 /** What the mod keeps per Codex run, keyed by tool_use_id, so the row can draw (the `$.state` value of types/index.d.ts). */
-export type RowRun = { effort: string; running: boolean; durationMs?: number; delta5h?: number; failed?: boolean }
+export type RowRun = { model?: string; effort: string; running: boolean; durationMs?: number; delta5h?: number; failed?: boolean }
 
 export function formatRowLine(r: RowRun): string {
-  const parts = ['Codex', r.effort]
+  const parts = ['Codex', ...(r.model !== undefined ? [r.model] : []), r.effort]
   if (r.running) parts.push('running')
   else {
     parts.push(formatDuration(r.durationMs ?? 0))

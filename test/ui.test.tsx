@@ -18,15 +18,15 @@ const runId = (w: { state: Map<string, unknown> }) => {
 }
 const codexLine = (ui: any) => ui.find({ type: 'Text', text: /^Codex · / })
 
-test('row_of_a_finished_codex_run_keeps_the_row_and_adds_the_line', async ($, on) => {
+test('dw5_row_of_a_finished_codex_run_keeps_the_row_and_adds_the_model', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { rollout: rolloutFor(15) })
   engineRow(on)
-  await $.tool.call(agent() as any)
+  await $.tool.call(agent({ model: 'sonnet' }) as any)
   const id = runId(w)
   for (const surface of SURFACES) {
     const ui = await mount($, surface, id)
     expect((await ui.find({ type: 'Text', text: /ENGINE-ROW/ }))?.text).toBe('ENGINE-ROW')
-    expect((await codexLine(ui))?.text).toMatch(/^Codex · high · \d+s · \+10 pts 5h$/)
+    expect((await codexLine(ui))?.text).toMatch(/^Codex · gpt-6.1-terra · medium · \d+s · \+10 pts 5h$/)
     await ui.unmount()
   }
 })
@@ -56,16 +56,16 @@ test('row_of_a_tool_that_is_not_an_agent_is_left_alone', async ($, on) => {
   await ui.unmount()
 })
 
-test('row_of_a_background_run_says_running_then_loses_the_line_when_it_is_stopped', async ($, on) => {
+test('dw5_row_of_a_background_run_shows_model_then_loses_the_line_when_stopped', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { script: 'hang' })
   engineRow(on)
   await startSession($)
-  const r: any = await $.tool.call(agent({ run_in_background: undefined }) as any)
+  const r: any = await $.tool.call(agent({ model: 'opus', run_in_background: undefined }) as any)
   await settleReal(() => w.spawns.length > 0 && inflightKeys(w).length > 0)
   const id = runId(w)
   for (const surface of SURFACES) {
     const ui = await mount($, surface, id)
-    expect((await codexLine(ui))?.text).toBe('Codex · high · running')
+    expect((await codexLine(ui))?.text).toBe('Codex · gpt-6.1-sol · high · running')
     await ui.unmount()
   }
   await $.tool.call({ tool: 'TaskStop', task_id: r.result.agentId } as any)
@@ -78,14 +78,14 @@ test('row_of_a_background_run_says_running_then_loses_the_line_when_it_is_stoppe
   await ui.unmount()
 })
 
-test('row_of_a_finished_background_run_shows_its_duration', async ($, on) => {
+test('dw5_row_of_a_finished_background_run_shows_default_and_duration', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { rollout: rolloutFor(15) })
   engineRow(on)
   await $.tool.call(agent({ run_in_background: undefined }) as any)
   await settleReal(() => w.submits.length > 0)
   expect(w.submits[0]).toContain(CODEX_TEXT)
   const ui = await mount($, 'desktop', runId(w))
-  expect((await codexLine(ui))?.text).toMatch(/^Codex · high · \d+s · \+10 pts 5h$/)
+  expect((await codexLine(ui))?.text).toMatch(/^Codex · default · high · \d+s · \+10 pts 5h$/)
   await ui.unmount()
 })
 

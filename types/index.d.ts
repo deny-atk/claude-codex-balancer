@@ -2,6 +2,7 @@
 // The mod writes it from `tool.call` and when a run ends; the ToolUse render hook reads it, so a row
 // is drawn again when a background run finishes. Null: no line (the task ran on Claude).
 export type BalancerRun = {
+  model?: string
   effort: string
   running: boolean
   durationMs?: number

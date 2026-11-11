@@ -7,7 +7,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  effortFor, gitSnapshot, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
+  codexModelFor, effortFor, gitSnapshot, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate, FIVE_HOUR_MS } from './policy'
@@ -45,6 +45,7 @@ export function readOptions(o: PluginOptions) {
     } as PolicyConfig,
     eligible: new Set(str(o, 'eligibleAgentTypes', 'general-purpose,claude,Explore').split(',').map(s => s.trim()).filter(Boolean)),
     effortMap: parseEffortMap(str(o, 'effortMap', 'haiku=low,sonnet=medium,opus=high,default=high')),
+    modelMap: parseEffortMap(str(o, 'modelMap', 'opus=gpt-6.1-sol,sonnet=gpt-6.1-terra')),
     codexModel: str(o, 'codexModel', ''),
     taskTimeoutMs: num(o, 'taskTimeoutMinutes', 30) * MIN_MS,
     staleAfterMs: num(o, 'staleAfterMinutes', 15) * MIN_MS,
@@ -88,7 +89,7 @@ function deltaOf(b: ProviderReading | null, a: ProviderReading | null): Cost | u
 type Task = {
   agentId: string; sessionId: string; type: string; description: string; prompt: string
   rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
-  cwd: string; sandbox: Sandbox; effort: string; outFile: string
+  cwd: string; sandbox: Sandbox; model?: string; effort: string; outFile: string
   base: string // `<data>/runs/<agentId>`: the patch and partial notes go beside the other run files
   estimate: Cost; codexBefore: ProviderReading | null
   entry: DecisionEntry
@@ -371,10 +372,12 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const task: Task = {
     agentId, sessionId, type, description: e.description, prompt: e.prompt, rowId: e.tool_use_id,
     cwd, sandbox, effort: effortFor(e.model, st.opts.effortMap), outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`,
+    model: codexModelFor(e.model, st.opts.modelMap, st.opts.codexModel),
     estimate: picked.estimate, codexBefore: picked.codex, entry: picked.entry,
   }
 
-  await setRun($, task.rowId, { effort: task.effort, running: true })
+  task.entry.codexModel = task.model ?? 'default'
+  await setRun($, task.rowId, { model: task.model ?? 'default', effort: task.effort, running: true })
   await observe($, st)
 
   // The 2.1.321 input type omits run_in_background; the model may still send it.
@@ -419,7 +422,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
     // Codex does not create the folder of its -o file; $.fs.write makes missing parents.
     try { await $.fs.write(c.outFile, '') } catch { /* best effort */ }
     const built = buildCodexArgv({
-      cwd: c.cwd, sandbox: c.sandbox, effort: c.effort, ...(st.opts.codexModel ? { model: st.opts.codexModel } : {}),
+      cwd: c.cwd, sandbox: c.sandbox, effort: c.effort, model: c.model,
       outFile: c.outFile, prompt: c.prompt,
     })
     run = await runCodex($, {
@@ -465,7 +468,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   await writeLog($, st, c.entry)
 
   await setRun($, c.rowId, run.outcome === 'aborted' ? null : {
-    effort: c.effort, running: false, durationMs: run.durationMs, ...(delta ? { delta5h: delta.fiveHour } : {}),
+    model: c.model ?? 'default', effort: c.effort, running: false, durationMs: run.durationMs, ...(delta ? { delta5h: delta.fiveHour } : {}),
     ...(run.outcome === 'ok' && run.finalMessage !== undefined ? {} : { failed: true }),
   })
   await observe($, st)
@@ -478,7 +481,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
     return {
       kind: 'ok', durationMs: run.durationMs,
       report: buildReport({
-        finalMessage: run.finalMessage, effort: c.effort, durationMs: run.durationMs, threadId: run.threadId,
+        finalMessage: run.finalMessage, model: c.model, effort: c.effort, durationMs: run.durationMs, threadId: run.threadId,
         maxResultChars: st.opts.maxResultChars, ...(cut ? { fullTextPath } : {}), gitStatus: afterGit, sandbox: c.sandbox,
       }),
     }
@@ -642,6 +645,7 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
     await reserve($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type }, await listInflight($, now, st.opts.taskTimeoutMs))
     const entry: DecisionEntry = {
       t: now, session: sessionId, agentType: type, route: 'codex', reason: 'mode-codex',
+      codexModel: st.opts.codexModel || 'default',
       claudeAfter: Math.round(score(claude, now, st.opts.claudeCost) * 10) / 10,
       codexAfter: Math.round(score(codex, now, estimate) * 10) / 10, estimate, mode: modeNow(st),
     }
@@ -652,6 +656,7 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
   const { agentId } = picked
   const c: Task = {
     agentId, sessionId, type, description: '/codex', prompt: task, cwd, sandbox: 'workspace-write', effort: 'high',
+    model: st.opts.codexModel || undefined,
     outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`, estimate: picked.estimate, codexBefore: picked.codex,
     entry: picked.entry,
   }

@@ -57,14 +57,14 @@ Claude Code may send `run_in_background` with an Agent call. The engine's own de
 Foreground (`run_in_background` is `false`): Balancer runs Codex inside the hook and the main turn waits. The model receives a normal completed subagent result whose text is one provenance line, a blank line, then Codex's final message:
 
 ```
-[balancer] Ran on Codex (effort high, 2m13s, session 0193…). Treat as a subagent report; verify before relying on it.
+[balancer] Ran on Codex (model gpt-6.1-sol, effort high, 2m13s, session 0193…). Treat as a subagent report; verify before relying on it.
 ```
 
 The report is cut at `maxResultChars` with a note and the path of the full text under the data folder. For a `workspace-write` run, the paths that `git status` lists as changed or untracked (paths only, at most 50) are appended.
 
 Background (true or absent): Balancer answers at once with a launched-in-background result (agent id `codex-<uuid>`, output file under the data folder) and runs Codex in a detached task. When it finishes it writes the report to the output file and delivers a message with `$.prompt.submit`: a line saying the background agent finished on Codex, then the same report. That starts a turn once the session is idle.
 
-Codex runs with `codex exec --json --skip-git-repo-check -C <cwd> -s <sandbox> -c model_reasoning_effort=<effort> [-m <codexModel>] -o <file> <prompt>`, started by argv, never through a shell. The prompt is a fixed preamble (a delegated subtask, do only what the brief asks, no commit, push or branch switch, end with a report) followed by the brief unchanged. A prompt over 100 KB goes in on stdin. The sandbox is `read-only` for `Explore` and for plan mode, `workspace-write` otherwise. Dangerous bypass flags and `--ephemeral` are never used. Effort comes from `effortMap` by the call's `model`, then its `default` entry, then `high`. Plan mode is taken from the Agent call's `mode` argument or the permission mode of the last submitted prompt.
+Codex runs with `codex exec --json --skip-git-repo-check -C <cwd> -s <sandbox> -c model_reasoning_effort=<effort> [-m <model>] -o <file> <prompt>`, started by argv, never through a shell. The prompt is a fixed preamble (a delegated subtask, do only what the brief asks, no commit, push or branch switch, end with a report) followed by the brief unchanged. A prompt over 100 KB goes in on stdin. The sandbox is `read-only` for `Explore` and for plan mode, `workspace-write` otherwise. Dangerous bypass flags and `--ephemeral` are never used. Effort comes from `effortMap` by the call's `model`, then its `default` entry, then `high`. The Codex model comes from an exact `modelMap` match on the Agent call's `model` (by default, `opus` → `gpt-6.1-sol`, `sonnet` → `gpt-6.1-terra`), then non-empty `codexModel`, otherwise no `-m` is passed. The map has no special `default` key; malformed pairs are skipped as in `effortMap`. The provenance, tool row and decision log show the selected model, or `default` when no `-m` was passed. Plan mode is taken from the Agent call's `mode` argument or the permission mode of the last submitted prompt.
 
 ## Failure handling
 
@@ -121,7 +121,7 @@ Privacy rule for rollout files: they hold session content. Balancer reads only t
 
 ## Decision log
 
-`decisions.jsonl` in the data folder holds one JSON line per Agent call that reached a routing decision (not mode `off`, not ineligible calls). It is content-free: no brief, description or report text. Fields: `t` (epoch ms), `session`, `agentType`, `route`, `reason`, `claudeAfter`, `codexAfter` (scores after the task), `estimate` (`fiveHour`, `sevenDay`), `mode`, and for a Codex run `durationMs`, `outcome`, `exitCode` and `delta` (points used in each window, when both readings are known). A Codex-routed call is written when its run ends, a Claude-routed one at the decision.
+`decisions.jsonl` in the data folder holds one JSON line per Agent call that reached a routing decision (not mode `off`, not ineligible calls). It is content-free: no brief, description or report text. Fields: `t` (epoch ms), `session`, `agentType`, `route`, `reason`, `claudeAfter`, `codexAfter` (scores after the task), `estimate` (`fiveHour`, `sevenDay`), `mode`, and for a Codex run `codexModel`, `durationMs`, `outcome`, `exitCode` and `delta` (points used in each window, when both readings are known). A Codex-routed call is written when its run ends, a Claude-routed one at the decision.
 
 Reason codes: `mode-off`, `mode-claude`, `mode-codex`, `codex-unavailable`, `codex-limit`, `codex-concurrency`, `codex-ceiling`, `claude-ceiling`, `no-codex-reading`, `codex-ahead`, `claude-ahead`, `codex-cooldown`.
 
@@ -131,13 +131,13 @@ The file keeps the last 2000 lines. The file system API has no append, so each w
 
 Status entry, refreshed on each `session.measure` and after each decision or run: `C 5h 62 · 7d 55 │ X 5h 20 · 7d 46 │ → Claude`. Figures are used percent (a passed reset counts as 0, `–` means unknown). The route part appears after the first decision.
 
-Tool row: under an Agent row that ran on Codex, one dim line. While running: `Codex · high · running`. After: `Codex · high · 2m13s · +4 pts 5h`, with `failed` added on failure. The points show only when at least 1 and both readings were known. A task that fell back to Claude, or was stopped, has no line.
+Tool row: under an Agent row that ran on Codex, one dim line. While running: `Codex · gpt-6.1-sol · high · running`. After: `Codex · gpt-6.1-sol · high · 2m13s · +4 pts 5h`, with `failed` added on failure. Older stored rows without a model retain their previous format. The points show only when at least 1 and both readings were known. A task that fell back to Claude, or was stopped, has no line.
 
 Toasts, only for: a provider crossing a ceiling (once per crossing), Codex becoming unusable (once per session, whether the binary is missing or not logged in at the check before routing, or a launch failed), and a Codex failure that fell back to Claude.
 
 `/balance` prints the mode (and whether `/balance` set it), each provider's score, window use, reset time and runway, whether Codex is available (and any cooldown), tasks in flight, and the last 5 decisions, read from `decisions.jsonl` (so they include earlier sessions, and a Codex run shows once it has ended; blank or unparsable lines are skipped, and this session's own list is used if the file cannot be read). `/balance auto|claude|codex|off` sets the mode for this session, overriding the option.
 
-`/codex <task>` runs the text as a Codex task (`workspace-write`, effort `high`) and prints the report or the failure text. It makes no Claude model call and works while Claude is limited. It makes no routing decision, but it takes a reservation, is logged, and ends with the session. It refuses in mode `off`, in an opted-out project, and when Codex is unavailable.
+`/codex <task>` runs the text as a Codex task (`workspace-write`, effort `high`) and prints the report or the failure text. It uses non-empty `codexModel`, otherwise no `-m`, independently of `modelMap`. It makes no Claude model call and works while Claude is limited. It makes no routing decision, but it takes a reservation, is logged, and ends with the session. It refuses in mode `off`, in an opted-out project, and when Codex is unavailable.
 
 ## The delegation nudge
 
@@ -157,7 +157,8 @@ Set in the manifest's `userConfig`.
 | `ceilingSevenDay` | 97 | Same, weekly |
 | `eligibleAgentTypes` | `general-purpose,claude,Explore` | Comma-separated types that may run on Codex |
 | `effortMap` | `haiku=low,sonnet=medium,opus=high,default=high` | Agent `model` to Codex reasoning effort |
-| `codexModel` | empty | Override Codex's default model |
+| `modelMap` | `opus=gpt-6.1-sol,sonnet=gpt-6.1-terra` | Agent `model` to Codex model; exact matches win |
+| `codexModel` | empty | Fallback for unmapped calls and `/codex`; empty keeps Codex's default |
 | `maxConcurrentCodex` | 2 | Codex tasks at once, across all sessions |
 | `taskTimeoutMinutes` | 30 | Limit per Codex run; also the age at which a reservation expires |
 | `staleAfterMinutes` | 15 | Age at which the stored Codex reading is refreshed |

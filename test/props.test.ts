@@ -5,6 +5,7 @@ import type { EngineInterface } from 'claude-code'
 import { appendCapped, pushRecent } from '../hooks/balance'
 import type { DecisionEntry } from '../hooks/balance'
 import { createEventParser } from '../hooks/codex'
+import * as codex from '../hooks/codex'
 import { listInflight, parseCodexRolloutTail } from '../hooks/readings'
 import { MARKER, cutRecord, lines, rl, tokenCount } from './fixtures/rollout'
 
@@ -25,6 +26,18 @@ const int = (r: Rng, lo: number, hi: number) => lo + Math.floor(r() * (hi - lo +
 const forAll = (seed: number, body: (r: Rng, i: number) => void) => { const r = mulberry32(seed); for (let i = 0; i < CASES; i++) body(r, i) }
 
 const TEXTS = ['pong', 'a {"b": 1} c', 'line\nbreak', 'é漢字🙂', '', 'You hit your usage limit', 'boom', '\\"quoted\\"']
+
+test('dw3_prop_model_selection_agrees_with_exact_entry_or_fallback', () => {
+  forAll(106, r => {
+    const keys = ['opus', 'sonnet', 'default', 'constructor', 'toString']
+    const entries = keys.filter(() => r() < 0.5).map(key => [key, pick(r, ['gpt-a', 'gpt-b'])] as const)
+    const map = codex.parseEffortMap(entries.map(([key, value]) => `${key}=${value}`).join(','))
+    const model = pick(r, [...keys, 'haiku', undefined])
+    const fallback = pick(r, ['', 'gpt-fallback'])
+    const matching = entries.find(([key]) => key === model)
+    expect(codex.codexModelFor(model, map, fallback)).toBe(matching ? matching[1] : fallback || undefined)
+  })
+})
 
 // ---------- event parser ----------
 

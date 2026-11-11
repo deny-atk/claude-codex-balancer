@@ -49,10 +49,16 @@
       "description": "Agent model to Codex reasoning effort, as model=effort pairs",
       "default": "haiku=low,sonnet=medium,opus=high,default=high"
     },
+    "modelMap": {
+      "type": "string",
+      "title": "Model map",
+      "description": "Agent model to Codex model, as model=model pairs",
+      "default": "opus=gpt-6.1-sol,sonnet=gpt-6.1-terra"
+    },
     "codexModel": {
       "type": "string",
       "title": "Codex model",
-      "description": "Override Codex's default model; empty keeps the default",
+      "description": "Codex model for unmapped Agent calls and /codex; empty keeps Codex's default",
       "default": ""
     },
     "maxConcurrentCodex": {

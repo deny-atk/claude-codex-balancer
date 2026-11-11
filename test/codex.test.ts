@@ -1,4 +1,5 @@
 import { test, expect } from 'claude-code/testing'
+import * as codex from '../hooks/codex'
 import {
   PREAMBLE, parseEffortMap, effortFor, sandboxFor, buildCodexArgv, createEventParser, runCodex,
   gitSnapshot, changedSince, formatDuration, buildReport, buildFailureText,
@@ -31,6 +32,21 @@ const STREAM = [
 const cut = (s: string, n: number) => { const out: string[] = []; for (let i = 0; i < s.length; i += n) out.push(s.slice(i, i + n)); return out }
 
 const ARGS = { cwd: '/w', sandbox: 'workspace-write' as const, effort: 'high', outFile: '/tmp/o.txt', prompt: 'do it' }
+
+test('dw3_model_map_exact_match_wins_and_default_is_an_ordinary_key', () => {
+  const map = parseEffortMap('opus=gpt-6.1-sol,default=literal-default')
+  expect(codex.codexModelFor('opus', map, 'fallback')).toBe('gpt-6.1-sol')
+  expect(codex.codexModelFor('default', map, 'fallback')).toBe('literal-default')
+  expect(codex.codexModelFor('Opus', map, 'fallback')).toBe('fallback')
+  expect(codex.codexModelFor(undefined, map, '')).toBeUndefined()
+  expect(codex.codexModelFor('haiku', map, '')).toBeUndefined()
+})
+
+test('dw5_report_names_the_model_or_default', () => {
+  const options = { finalMessage: 'done', effort: 'medium', durationMs: 25_000, maxResultChars: 100, sandbox: 'read-only' as const }
+  expect(buildReport({ ...options, model: 'gpt-6.1-terra' })).toStartWith('[balancer] Ran on Codex (model gpt-6.1-terra, effort medium, 25s)')
+  expect(buildReport(options)).toStartWith('[balancer] Ran on Codex (model default, effort medium, 25s)')
+})
 
 // ---------- argv ----------
 
@@ -135,11 +151,11 @@ test('dw3_run ok from chunked stream, report, record', async () => {
   expect(seen.req.cwd).toBe('/w')
 
   const rep = buildReport({ finalMessage: r.finalMessage!, effort: 'high', durationMs: 133_000, threadId: r.threadId, maxResultChars: 1000, sandbox: 'read-only' })
-  expect(rep.split('\n')[0]).toBe('[balancer] Ran on Codex (effort high, 2m13s, session 01a1…). Treat as a subagent report; verify before relying on it.')
+  expect(rep.split('\n')[0]).toBe('[balancer] Ran on Codex (model default, effort high, 2m13s, session 01a1…). Treat as a subagent report; verify before relying on it.')
   expect(rep.split('\n')[1]).toBe('')
   expect(rep.split('\n')[2]).toBe('pong')
   expect(buildReport({ finalMessage: 'x', effort: 'low', durationMs: 45_000, maxResultChars: 10, sandbox: 'read-only' }).split('\n')[0])
-    .toBe('[balancer] Ran on Codex (effort low, 45s). Treat as a subagent report; verify before relying on it.')
+    .toBe('[balancer] Ran on Codex (model default, effort low, 45s). Treat as a subagent report; verify before relying on it.')
 
   const rec = completedRecord({ agentId: newAgentId(), text: rep, prompt: 'p', durationMs: 5, agentType: 'general-purpose' })
   expect(rec.status).toBe('completed')
