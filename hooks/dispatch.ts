@@ -1,5 +1,7 @@
 // Agent routing and execution (PRD 8, decisions D1). All state is per load (one closure), so tests do not share it.
 import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionMeasureInput, ToolCallInput } from 'claude-code'
+import { agentDefPaths, CAPABILITY_RE, codexEffort, configDirFor, defModel, parseAgentDef, unavailableTools } from './agentdef'
+import type { AgentDef } from './agentdef'
 import {
   appendCapped, ceilingHit, ceilingText, CODEX_USAGE, dataDirFor, formatBalance, formatStatus, gapOf, lastDecisions, NUDGE_ENTER_GAP, NUDGE_TEXT,
   nextTight, parseBalanceArgs, pushRecent, USAGE_LINE,
@@ -25,7 +27,6 @@ type TaskStopCall = Extract<ToolCallInput, { tool: 'TaskStop' }>
 const MIN_MS = 60_000
 const COOLDOWN_MS = 15 * MIN_MS
 const RECHECK_UNAVAILABLE_MS = 10 * MIN_MS
-const CAPABILITY_RE = /\bmcp__|\bSkill\b|\bSendMessage\b|\bAskUserQuestion\b|\bArtifact\b/
 
 export type Opts = ReturnType<typeof readOptions>
 type Provider = 'claude' | 'codex'
@@ -78,6 +79,7 @@ type Task = {
   agentId: string; sessionId: string; type: string; description: string; prompt: string
   rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
   cwd: string; sandbox: Sandbox; model?: string; effort: string; outFile: string
+  agent?: { type: string; body: string } // a custom type's instructions, carried to Codex
   base: string // `<data>/runs/<agentId>`: the patch and partial notes go beside the other run files
   estimate: Cost; codexBefore: ProviderReading | null
   entry: DecisionEntry
@@ -286,17 +288,32 @@ async function optedOut($: EngineInterface): Promise<boolean> {
   }
 }
 
-async function eligible($: EngineInterface, st: State, e: AgentCall): Promise<boolean> {
-  const type = e.subagent_type
-  if (type !== undefined && !st.opts.eligible.has(type)) return false
-  if (type === 'fork' || e.isolation != null || e.name != null || CAPABILITY_RE.test(e.prompt)) return false
-  if (await optedOut($)) return false
-  try {
-    await $.fs.stat(await $.session.cwd())
-  } catch {
-    return false
+/** The custom type's definition: the first file that exists decides, and it must parse. Null when there is none. */
+async function agentDefFor($: EngineInterface, type: string, cwd: string): Promise<AgentDef | null> {
+  const configDir = configDirFor(await $.env.get('CLAUDE_CONFIG_DIR'), await $.env.get('HOME'))
+  for (const path of agentDefPaths(type, cwd, configDir)) {
+    let text: unknown
+    try { text = await $.fs.read(path) } catch { continue }
+    return typeof text === 'string' ? parseAgentDef(text) : null
   }
-  return true
+  return null
+}
+
+/** Null: stays on Claude. Otherwise the custom type's definition, or `{}` for a listed type. */
+async function eligible($: EngineInterface, st: State, e: AgentCall): Promise<{ def?: AgentDef } | null> {
+  const type = e.subagent_type
+  if (type === 'fork' || e.isolation != null || e.name != null || CAPABILITY_RE.test(e.prompt)) return null
+  if (await optedOut($)) return null
+  let cwd: string
+  try {
+    cwd = await $.session.cwd()
+    await $.fs.stat(cwd)
+  } catch {
+    return null
+  }
+  if (type === undefined || st.opts.eligible.has(type)) return {}
+  const def = await agentDefFor($, type, cwd)
+  return def && !unavailableTools(def) ? { def } : null
 }
 
 // ---------- Agent hook ----------
@@ -304,7 +321,9 @@ async function eligible($: EngineInterface, st: State, e: AgentCall): Promise<bo
 export async function onAgent($: EngineInterface, st: State, e: AgentCall, next: Next<'tool.call', AgentCall>) {
   const mode = modeNow(st)
   if (mode === 'off') return next(e)
-  if (!(await eligible($, st, e))) return next(e)
+  const ok = await eligible($, st, e)
+  if (!ok) return next(e)
+  const def = ok.def // read once: eligibility and the task share it
 
   const type = e.subagent_type ?? 'general-purpose'
   const sessionId = await $.session.id()
@@ -356,11 +375,14 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   }
 
   const agentId = picked.agentId
-  const sandbox = sandboxFor(e.subagent_type, planMode)
+  const sandbox = sandboxFor(e.subagent_type, planMode, def?.tools)
+  const model = e.model ?? defModel(def)
   const task: Task = {
     agentId, sessionId, type, description: e.description, prompt: e.prompt, rowId: e.tool_use_id,
-    cwd, sandbox, effort: effortFor(e.model, st.opts.effortMap), outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`,
-    model: codexModelFor(e.model, st.opts.modelMap, st.opts.codexModel),
+    cwd, sandbox, effort: (def && codexEffort(def)) ?? effortFor(model, st.opts.effortMap),
+    outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`,
+    model: codexModelFor(model, st.opts.modelMap, st.opts.codexModel),
+    ...(def ? { agent: { type, body: def.body } } : {}),
     estimate: picked.estimate, codexBefore: picked.codex, entry: picked.entry,
   }
 
@@ -411,7 +433,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
     try { await $.fs.write(c.outFile, '') } catch { /* best effort */ }
     const built = buildCodexArgv({
       cwd: c.cwd, sandbox: c.sandbox, effort: c.effort, model: c.model,
-      outFile: c.outFile, prompt: c.prompt,
+      outFile: c.outFile, prompt: c.prompt, ...(c.agent ? { agent: c.agent } : {}),
     })
     run = await runCodex($, {
       argv: built.argv, ...(built.input !== undefined ? { input: built.input } : {}),

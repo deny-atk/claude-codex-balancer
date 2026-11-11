@@ -1,9 +1,10 @@
 // M2 (PRD 10, 9): status entry, toasts, /codex, delegation nudge, plan mode.
 import { test, expect } from 'claude-code/testing'
 import { formatRowLine, formatStatus, lastDecisions } from '../hooks/balance'
+import { PREAMBLE } from '../hooks/codex'
 import { register } from '../hooks/register'
 import {
-  CODEX_AHEAD, CODEX_IDLE, CODEX_TEXT, CWD, DATA, H, NOW, SID, SECTIONS,
+  CFG, CODEX_AHEAD, CODEX_IDLE, CODEX_TEXT, CWD, DATA, H, NOW, SID, SECTIONS,
   agent, inflightKeys, logLines, measure, reading, rolloutFor, settleReal, startSession, world,
 } from './harness'
 
@@ -499,3 +500,192 @@ test('dw16_hooks_exclude_security_intercepted_events', () => {
   ]
   expect(names.filter(name => name.startsWith('classic.') || intercepted.includes(name))).toEqual([])
 })
+
+// ---------- custom agent types (dw17-dw22) ----------
+
+const PROJECT_FILE = `${CWD}/.claude/agents/implementer.md`
+const USER_FILE = `${CFG}/agents/implementer.md`
+const AGENT_BODY = 'AGENT-BODY-LINE-1\n\nAGENT-BODY-LINE-2'
+const agentFile = (fm: string, body = AGENT_BODY) => `---\nname: implementer\n${fm}\n---\n${body}\n`
+const custom = (over: Record<string, unknown> = {}) => agent({ subagent_type: 'implementer', ...over }) as any
+const sentPrompt = (w: any): string => w.spawns[0]!.argv.at(-1)
+const argAfter = (w: any, flag: string): string => { const a = w.spawns[0]!.argv; return a[a.indexOf(flag) + 1] }
+
+test('dw17_project_file_makes_a_custom_type_eligible_and_the_log_names_it', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('tools: Read, Edit'))
+  const r: any = await $.tool.call(custom())
+  expect(r.result.status).toBe('completed')
+  expect(w.spawns).toHaveLength(1)
+  expect(w.agentCalls).toHaveLength(0)
+  expect(logLines(w)[0]).toMatchObject({ agentType: 'implementer', route: 'codex' })
+})
+
+test('dw17_user_file_is_used_when_the_project_has_none', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(USER_FILE, agentFile('', 'USER-BODY'))
+  await $.tool.call(custom())
+  expect(w.spawns).toHaveLength(1)
+  expect(sentPrompt(w)).toContain('USER-BODY')
+})
+
+test('dw17_project_file_wins_over_the_user_file', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('tools: Read', 'PROJECT-BODY'))
+  w.files.set(USER_FILE, agentFile('tools: Edit', 'USER-BODY'))
+  await $.tool.call(custom())
+  expect(sentPrompt(w)).toContain('PROJECT-BODY')
+  expect(sentPrompt(w)).not.toContain('USER-BODY')
+  expect(argAfter(w, '-s')).toBe('read-only')
+})
+
+test('dw17_the_other_eligibility_rules_still_apply_to_custom_types', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile(''))
+  for (const over of [{ name: 'x' }, { isolation: 'worktree' }, { prompt: 'use the Skill tool please' }]) {
+    const r: any = await $.tool.call(custom(over))
+    expect(r.result).toEqual({ status: 'claude-ran' })
+  }
+  w.cwdExists = false
+  expect(((await $.tool.call(custom())) as any).result).toEqual({ status: 'claude-ran' })
+  expect(w.spawns).toHaveLength(0)
+})
+
+test('dw17_opt_out_file_keeps_a_custom_type_on_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile(''))
+  w.files.set(`${CWD}/.claude/balancer.json`, '{"codex": false}')
+  const r: any = await $.tool.call(custom())
+  expect(r.result).toEqual({ status: 'claude-ran' })
+  expect(w.spawns).toHaveLength(0)
+})
+
+test('dw18_no_definition_file_stays_on_claude_unchanged', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  const input = custom()
+  await $.tool.call(input)
+  expect(w.spawns).toHaveLength(0)
+  expect(w.agentCalls).toHaveLength(1)
+  expect(w.agentCalls[0]).toMatchObject(input) // the engine adds tool_use_id; nothing is changed
+})
+
+test('dw18_plugin_type_with_a_colon_stays_on_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(`${CWD}/.claude/agents/pl:implementer.md`, agentFile(''))
+  w.files.set(`${CFG}/agents/pl:implementer.md`, agentFile(''))
+  await $.tool.call(custom({ subagent_type: 'pl:implementer' }))
+  expect(w.spawns).toHaveLength(0)
+  expect(w.agentCalls).toHaveLength(1)
+})
+
+for (const [id, text] of [['no_frontmatter', 'You are an implementer.\n'], ['unclosed', '---\nname: x\nbody\n']] as const) {
+  test(`dw18_file_with_${id}_stays_on_claude`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    w.files.set(PROJECT_FILE, text)
+    await $.tool.call(custom())
+    expect(w.spawns).toHaveLength(0)
+    expect(w.agentCalls).toHaveLength(1)
+  })
+}
+
+test('dw18_a_broken_project_file_does_not_fall_through_to_the_user_file', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, 'no frontmatter')
+  w.files.set(USER_FILE, agentFile(''))
+  await $.tool.call(custom())
+  expect(w.spawns).toHaveLength(0)
+})
+
+test('dw19_codex_gets_preamble_then_instructions_then_the_brief_without_frontmatter', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('tools: Read, Edit\nmodel: sonnet\neffort: high'))
+  await $.tool.call(custom({ prompt: 'THE-BRIEF' }))
+  expect(sentPrompt(w)).toBe(`${PREAMBLE}\n\nInstructions for the implementer agent you are acting as:\n${AGENT_BODY}\n\nTHE-BRIEF`)
+})
+
+test('dw19_a_built_in_type_gets_exactly_the_old_prompt_even_if_a_file_has_its_name', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(`${CWD}/.claude/agents/general-purpose.md`, agentFile('', 'SHADOW-BODY'))
+  await $.tool.call(agent({ subagent_type: 'general-purpose', prompt: 'THE-BRIEF' }) as any)
+  expect(sentPrompt(w)).toBe(`${PREAMBLE}\n\nTHE-BRIEF`)
+  expect(argAfter(w, '-s')).toBe('workspace-write')
+})
+
+const MODELS = OPTS({ modelMap: 'sonnet=gpt-sonnet,opus=gpt-opus', effortMap: 'sonnet=medium,opus=low,default=high' })
+
+test('dw20_frontmatter_model_picks_the_codex_model_and_the_effort_map_entry', MODELS, async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('model: sonnet'))
+  const r: any = await $.tool.call(custom())
+  expect(argAfter(w, '-m')).toBe('gpt-sonnet')
+  expect(argAfter(w, '-c')).toBe('model_reasoning_effort=medium')
+  expect(r.result.content[0].text).toContain('model gpt-sonnet, effort medium')
+})
+
+test('dw20_explicit_call_model_beats_the_frontmatter_model', MODELS, async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('model: sonnet'))
+  await $.tool.call(custom({ model: 'opus' }))
+  expect(argAfter(w, '-m')).toBe('gpt-opus')
+  expect(argAfter(w, '-c')).toBe('model_reasoning_effort=low')
+})
+
+for (const model of ['inherit', '']) {
+  test(`dw20_frontmatter_model_${model || 'empty'}_is_ignored`, MODELS, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    w.files.set(PROJECT_FILE, agentFile(`model: ${model}`))
+    await $.tool.call(custom())
+    expect(w.spawns[0]!.argv).not.toContain('-m')
+    expect(argAfter(w, '-c')).toBe('model_reasoning_effort=high')
+  })
+}
+
+for (const [fm, want] of [['low', 'low'], ['xhigh', 'xhigh'], ['max', 'xhigh'], ['turbo', 'medium']] as const) {
+  test(`dw20_frontmatter_effort_${fm}_gives_${want}`, MODELS, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    w.files.set(PROJECT_FILE, agentFile(`model: sonnet\neffort: ${fm}`))
+    await $.tool.call(custom())
+    expect(argAfter(w, '-c')).toBe(`model_reasoning_effort=${want}`) // turbo is ignored: sonnet=medium
+  })
+}
+
+test('dw20_frontmatter_effort_still_applies_with_an_explicit_call_model', MODELS, async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('model: sonnet\neffort: max'))
+  await $.tool.call(custom({ model: 'opus' }))
+  expect(argAfter(w, '-m')).toBe('gpt-opus')
+  expect(argAfter(w, '-c')).toBe('model_reasoning_effort=xhigh')
+})
+
+test('dw21_tools_without_edit_or_write_run_read_only', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('tools: Read, Grep, Bash'))
+  await $.tool.call(custom())
+  expect(argAfter(w, '-s')).toBe('read-only')
+})
+
+for (const tools of ['Read, Edit', 'Write', 'NotebookEdit, Read', '']) {
+  test(`dw21_tools_${tools.replace(/\W+/g, '_') || 'absent'}_run_workspace_write`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    w.files.set(PROJECT_FILE, agentFile(tools ? `tools: ${tools}` : ''))
+    await $.tool.call(custom())
+    expect(argAfter(w, '-s')).toBe('workspace-write')
+  })
+}
+
+test('dw21_plan_mode_forces_read_only_for_a_custom_type', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PROJECT_FILE, agentFile('tools: Read, Edit'))
+  await $.tool.call(custom({ mode: 'plan' }))
+  expect(argAfter(w, '-s')).toBe('read-only')
+})
+
+for (const [id, tool] of [['mcp', 'mcp__srv__lookup'], ['skill', 'Skill'], ['send', 'SendMessage'], ['ask', 'AskUserQuestion'], ['artifact', 'Artifact']] as const) {
+  test(`dw22_tools_naming_${id}_keep_the_type_on_claude`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    w.files.set(PROJECT_FILE, agentFile(`tools: [Read, Edit, ${tool}]`))
+    await $.tool.call(custom())
+    expect(w.spawns).toHaveLength(0)
+    expect(w.agentCalls).toHaveLength(1)
+  })
+}

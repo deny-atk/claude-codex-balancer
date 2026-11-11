@@ -1,5 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 import * as codex from '../hooks/codex'
+import { agentDefPaths, codexEffort, configDirFor, parseAgentDef, unavailableTools } from '../hooks/agentdef'
 import {
   PREAMBLE, parseEffortMap, effortFor, sandboxFor, buildCodexArgv, createEventParser, runCodex,
   gitSnapshot, changedSince, formatDuration, buildReport, buildFailureText,
@@ -394,4 +395,100 @@ test('dw5_buildFailureText carries patch, untracked files, partial notes and the
   expect(bare).not.toContain('N'.repeat(4001))
   expect(bare).toContain('No files were changed')
   expect(buildFailureText({ reason: 'x', changedFiles: null, sandbox: 'workspace-write' })).not.toContain('resume')
+})
+
+// ---------- custom agent definitions (dw17-dw22) ----------
+
+const DEF = (fm: string, body = 'BODY') => `---\n${fm}\n---\n${body}\n`
+
+test('dw17_agent_paths_are_project_then_user_by_file_name', () => {
+  expect(agentDefPaths('implementer', '/p', '/c')).toEqual(['/p/.claude/agents/implementer.md', '/c/agents/implementer.md'])
+})
+
+test('dw17_config_dir_is_the_env_value_else_home_dot_claude', () => {
+  expect(configDirFor('/c', '/h')).toBe('/c')
+  expect(configDirFor(undefined, '/h')).toBe('/h/.claude')
+  expect(configDirFor('', '/h')).toBe('/h/.claude')
+})
+
+for (const [id, type] of [['plugin', 'pl:agent'], ['dotdot', '../x'], ['slash', 'a/b'], ['empty', ''], ['dot', '.hidden']] as const) {
+  test(`dw18_agent_paths_none_for_${id}_type`, () => {
+    expect(agentDefPaths(type, '/p', '/c')).toEqual([])
+  })
+}
+
+for (const [id, text] of [['no_frontmatter', 'just text\n'], ['unclosed', '---\nname: x\nbody\n'], ['empty', '']] as const) {
+  test(`dw18_parse_returns_null_for_${id}`, () => {
+    expect(parseAgentDef(text)).toBeNull()
+  })
+}
+
+test('dw17_parse_reads_keys_and_strips_the_frontmatter_from_the_body', () => {
+  const d = parseAgentDef(DEF('name: implementer\ndescription: x: y\nmodel: "sonnet"\neffort: high\nmaxTurns: 80', 'L1\n\nL2'))
+  expect(d).toEqual({ body: 'L1\n\nL2', model: 'sonnet', effort: 'high' })
+  expect(parseAgentDef('---\r\nmodel: opus\r\n---\r\nB\r\n')).toEqual({ body: 'B', model: 'opus' })
+  expect(parseAgentDef('---\nname: x\n---\n')).toEqual({ body: '' })
+})
+
+for (const [id, fm] of [
+  ['csv', 'tools: Read, Edit,Bash'],
+  ['inline_list', 'tools: [Read, "Edit", Bash]'],
+  ['dash_lines', 'tools:\n  - Read\n  - Edit\n  - Bash\nmodel: opus'],
+] as const) {
+  test(`dw17_parse_tools_${id}`, () => {
+    expect(parseAgentDef(DEF(fm))!.tools).toEqual(['Read', 'Edit', 'Bash'])
+  })
+}
+
+test('dw21_parse_tools_absent_or_empty_is_undefined', () => {
+  expect(parseAgentDef(DEF('name: x'))!.tools).toBeUndefined()
+  expect(parseAgentDef(DEF('tools:'))!.tools).toBeUndefined()
+})
+
+test('dw21_sandbox_from_tools', () => {
+  expect(sandboxFor('implementer', false, ['Read', 'Grep'])).toBe('read-only')
+  for (const t of ['Edit', 'Write', 'NotebookEdit', 'Edit(src/**)']) {
+    expect(sandboxFor('implementer', false, ['Read', t])).toBe('workspace-write')
+  }
+  expect(sandboxFor('implementer', false, undefined)).toBe('workspace-write')
+  expect(sandboxFor('implementer', true, ['Edit'])).toBe('read-only')
+  expect(sandboxFor('Explore', false, ['Edit'])).toBe('read-only')
+})
+
+test('dw20_codex_effort_from_frontmatter', () => {
+  const e = (effort?: string) => codexEffort({ body: '', ...(effort !== undefined ? { effort } : {}) })
+  expect(['low', 'medium', 'high', 'xhigh'].map(e)).toEqual(['low', 'medium', 'high', 'xhigh'])
+  expect(e('max')).toBe('xhigh')
+  expect(e('HIGH')).toBe('high')
+  expect(e('turbo')).toBeUndefined()
+  expect(e('')).toBeUndefined()
+  expect(e()).toBeUndefined()
+})
+
+for (const [id, tools] of [['mcp', 'mcp__srv__tool'], ['skill', 'Skill'], ['send', 'SendMessage'], ['ask', 'AskUserQuestion'], ['artifact', 'Artifact']] as const) {
+  test(`dw22_unavailable_tool_${id}`, () => {
+    expect(unavailableTools({ body: '', tools: ['Read', tools] })).toBe(true)
+  })
+}
+
+test('dw22_ordinary_tools_are_available', () => {
+  expect(unavailableTools({ body: '', tools: ['Read', 'Edit', 'Bash', 'Grep', 'WebFetch'] })).toBe(false)
+  expect(unavailableTools({ body: '' })).toBe(false)
+})
+
+test('dw19_prompt_is_preamble_then_instructions_then_brief', () => {
+  const { argv } = buildCodexArgv({ ...ARGS, prompt: 'the brief', agent: { type: 'implementer', body: 'RULES' } })
+  expect(argv[argv.length - 1]).toBe(`${PREAMBLE}\n\nInstructions for the implementer agent you are acting as:\nRULES\n\nthe brief`)
+})
+
+test('dw19_empty_body_adds_no_instructions_block', () => {
+  const { argv } = buildCodexArgv({ ...ARGS, agent: { type: 'implementer', body: '' } })
+  expect(argv[argv.length - 1]).toBe(PREAMBLE + '\n\ndo it')
+})
+
+test('dw19_big_instructions_still_go_through_stdin', () => {
+  const { argv, input } = buildCodexArgv({ ...ARGS, prompt: 'brief', agent: { type: 'implementer', body: 'x'.repeat(150_000) } })
+  expect(argv[argv.length - 1]).toBe('-')
+  expect(input).toStartWith(PREAMBLE + '\n\nInstructions for the implementer agent you are acting as:\nxxx')
+  expect(input).toEndWith('\n\nbrief')
 })

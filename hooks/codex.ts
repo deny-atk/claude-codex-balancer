@@ -1,4 +1,5 @@
 import type { BuiltinToolResults, EngineInterface } from 'claude-code'
+import { readOnlyTools } from './agentdef'
 
 // Only what this module calls, so the test kit's `$` type fits too.
 type $ = Pick<EngineInterface, 'process' | 'clock'>
@@ -35,14 +36,19 @@ export function codexModelFor(model: string | undefined, map: Record<string, str
   return model !== undefined && Object.prototype.hasOwnProperty.call(map, model) ? map[model] : codexModel || undefined
 }
 
-export function sandboxFor(agentType: string | undefined, planMode: boolean): Sandbox {
-  return agentType === 'Explore' || planMode ? 'read-only' : 'workspace-write'
+/** `tools` is a custom agent's tools list: one that cannot edit files runs read-only. */
+export function sandboxFor(agentType: string | undefined, planMode: boolean, tools?: readonly string[]): Sandbox {
+  return agentType === 'Explore' || planMode || (tools !== undefined && readOnlyTools(tools)) ? 'read-only' : 'workspace-write'
 }
 
 export function buildCodexArgv(o: {
   cwd: string; sandbox: Sandbox; effort: string; model?: string; outFile: string; prompt: string
+  agent?: { type: string; body: string } // a custom type's instructions, placed between the preamble and the brief
 }): { argv: string[]; input?: string } {
-  const full = PREAMBLE + '\n\n' + o.prompt
+  const instructions = o.agent?.body
+    ? `Instructions for the ${o.agent.type} agent you are acting as:\n${o.agent.body}\n\n`
+    : ''
+  const full = PREAMBLE + '\n\n' + instructions + o.prompt
   const big = new TextEncoder().encode(full).length > PROMPT_ARG_LIMIT_BYTES
   const argv = [
     'codex', 'exec', '--json', '--skip-git-repo-check', '-C', o.cwd, '-s', o.sandbox,
