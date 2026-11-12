@@ -3,7 +3,7 @@ import type { EngineInterface } from 'claude-code'
 import {
   addInflight, claudeFromUsage, codexAvailable, createReadingCache, currentCodexReading,
   expireLimit, listInflight, loadEstimate, loadReading, parseAppServerOutput,
-  parseCodexRolloutTail, pickFresher, readCodexAppServer, readCodexRollout,
+  mergeUsage, parseCodexRolloutTail, pickFresher, readCodexAppServer, readCodexRollout,
   removeInflight, rolloutDayDirs, saveEstimate, saveReading, sumReserved, APP_SERVER_SCRIPT,
 } from './../hooks/readings'
 import { MARKER, appServerOut, cutRecord, lines, rl, tokenCount, win5h, win7d } from './fixtures/rollout'
@@ -349,4 +349,48 @@ test('readings_current_codex_reading_app_server_first', async () => {
 test('readings_current_codex_reading_all_fail', async () => {
   const s = wire({ files: {}, tail: '', tailExit: 1 })
   expect(await currentCodexReading(s.$, NOW, 1000)).toBeNull()
+})
+
+// ---------- same-window merge (dw25) ----------
+// Usage inside one window only rises, so a reading that arrives later but reports less for the same window is old news:
+// the engine's first measurement after a session resumes repeats that session's last, possibly hours-old, figures.
+
+const H5 = 300 * 60_000
+const D7 = 10080 * 60_000
+const rd = (five: [number, number] | null, seven: [number, number] | null, readAt: number) => ({
+  fiveHour: five && { used: five[0], resetsAt: five[1], lengthMs: H5 },
+  sevenDay: seven && { used: seven[0], resetsAt: seven[1], lengthMs: D7 },
+  readAt, limitReached: false,
+})
+
+test('dw25_same_window_keeps_the_higher_used_whatever_arrived_last', () => {
+  const fresh = rd([66, NOW + H5], [10, NOW + D7], NOW)
+  const stale = rd([36, NOW + H5], [6, NOW + D7], NOW + 60_000)
+  for (const m of [mergeUsage(fresh, stale), mergeUsage(stale, fresh)]) {
+    expect(m!.fiveHour!.used).toBe(66)
+    expect(m!.sevenDay!.used).toBe(10)
+    expect(m!.readAt).toBe(NOW + 60_000)
+  }
+})
+
+test('dw25_a_later_window_wins_even_with_less_used', () => {
+  const old = rd([90, NOW], [10, NOW + D7], NOW)
+  const reset = rd([5, NOW + H5], [10, NOW + D7], NOW + 60_000)
+  expect(mergeUsage(old, reset)!.fiveHour).toEqual({ used: 5, resetsAt: NOW + H5, lengthMs: H5 })
+  expect(mergeUsage(reset, old)!.fiveHour).toEqual({ used: 5, resetsAt: NOW + H5, lengthMs: H5 })
+})
+
+test('dw25_an_earlier_window_loses_even_when_read_later', () => {
+  const current = rd([20, NOW + H5], [10, NOW + D7], NOW)
+  const stale = rd([36, NOW - H5], [6, NOW + D7 - D7], NOW + 60_000)
+  const m = mergeUsage(current, stale)!
+  expect(m.fiveHour!.used).toBe(20)
+  expect(m.sevenDay!.used).toBe(10)
+})
+
+test('dw25_a_missing_window_takes_the_other_reading\'s', () => {
+  const m = mergeUsage(rd([20, NOW + H5], null, NOW), rd(null, [7, NOW + D7], NOW))!
+  expect(m.fiveHour!.used).toBe(20)
+  expect(m.sevenDay!.used).toBe(7)
+  expect(mergeUsage(null, null)).toBeNull()
 })

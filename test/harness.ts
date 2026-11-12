@@ -215,13 +215,14 @@ export const logLines = (w: World): any[] =>
 
 const iso = (t: number) => new Date(t).toISOString()
 /** Raises session.measure with live Claude windows at `five` and `seven` percent used, full windows ahead. */
-export const measure = async ($: any, w: World, five: number, seven: number) => {
+/** `later` moves both resets on: a later window, where usage may be lower (within one window it only rises). */
+export const measure = async ($: any, w: World, five: number, seven: number, later = 0) => {
   await w.clock.advance(60_000) // a measure at the same instant as the stored reading would lose the tie
   return $.session.measure({
     context: {}, changed: ['rateLimits'],
     rateLimits: [
-      { kind: 'five_hour', percentUsed: five, resetsAt: iso(NOW + 5 * H) },
-      { kind: 'seven_day', percentUsed: seven, resetsAt: iso(NOW + 7 * D) },
+      { kind: 'five_hour', percentUsed: five, resetsAt: iso(NOW + 5 * H + later) },
+      { kind: 'seven_day', percentUsed: seven, resetsAt: iso(NOW + 7 * D + later) },
     ],
   })
 }

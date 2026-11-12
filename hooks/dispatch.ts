@@ -17,7 +17,7 @@ import type { Cost, Decision, Mode, PolicyConfig, ProviderReading } from './poli
 import type { Inflight } from './readings'
 import {
   addInflight, claudeFromUsage, codexAvailable, createReadingCache, currentCodexReading, expireLimit,
-  listInflight, loadEstimate, loadReading, pickFresher, readCodexRollout, removeInflight, saveEstimate,
+  listInflight, loadEstimate, loadReading, mergeUsage, readCodexRollout, removeInflight, saveEstimate,
   saveReading, sumReserved,
 } from './readings'
 
@@ -140,7 +140,7 @@ async function dataDir($: EngineInterface, st: State): Promise<string> {
 // Preserve a previously stored limit until its reset, including readings saved by older versions.
 function mergeClaude(stored: ProviderReading | null, live: ProviderReading | null, now: number): ProviderReading | null {
   const s = stored ? expireLimit(stored, now) : null
-  const picked = pickFresher(s, live)
+  const picked = mergeUsage(s, live)
   return picked && s?.limitReached && !picked.limitReached ? { ...picked, limitReached: true } : picked
 }
 

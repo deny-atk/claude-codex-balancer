@@ -85,6 +85,30 @@ export function claudeFromUsage(
   return { ...w, readAt: now, limitReached: false }
 }
 
+/**
+ * One window from two readings. Usage inside a window only rises, so for the same window (resets within half a
+ * window of each other) the higher figure wins, and otherwise the window that resets later is the newer one. Arrival
+ * order is no evidence: the engine's first measurement after a session resumes repeats that session's last, possibly
+ * hours-old, figures.
+ */
+function mergeWindow(a: WindowReading | null, b: WindowReading | null): WindowReading | null {
+  if (!a || !b) return a ?? b
+  if (a.resetsAt === null || b.resetsAt === null) return b.resetsAt === null ? a : b // a known reset beats an unknown one
+  if (Math.abs(a.resetsAt - b.resetsAt) < Math.min(a.lengthMs, b.lengthMs) / 2) return a.used >= b.used ? a : b
+  return a.resetsAt > b.resetsAt ? a : b
+}
+
+/** Claude's reading from two sources (stored, live), window by window; see mergeWindow. */
+export function mergeUsage(a: ProviderReading | null, b: ProviderReading | null): ProviderReading | null {
+  if (!a || !b) return a ?? b
+  return {
+    fiveHour: mergeWindow(a.fiveHour, b.fiveHour),
+    sevenDay: mergeWindow(a.sevenDay, b.sevenDay),
+    readAt: Math.max(a.readAt, b.readAt),
+    limitReached: (b.readAt > a.readAt ? b : a).limitReached,
+  }
+}
+
 export const pickFresher = (a: ProviderReading | null, b: ProviderReading | null): ProviderReading | null =>
   !a ? b : !b ? a : b.readAt > a.readAt ? b : a
 

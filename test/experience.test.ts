@@ -4,7 +4,7 @@ import { formatRowLine, formatStatus, lastDecisions } from '../hooks/balance'
 import { PREAMBLE } from '../hooks/codex'
 import { register } from '../hooks/register'
 import {
-  CFG, CODEX_AHEAD, CODEX_IDLE, CODEX_TEXT, CWD, DATA, H, NOW, SID, SECTIONS,
+  CFG, CODEX_AHEAD, CODEX_IDLE, CODEX_TEXT, CWD, D, DATA, H, NOW, SID, SECTIONS,
   agent, inflightKeys, logLines, measure, reading, rolloutFor, settleReal, startSession, world,
 } from './harness'
 
@@ -108,8 +108,8 @@ test('toast_claude_crossing_a_ceiling_once_per_crossing', async ($, on) => {
   expect(ceilingToasts(w)[0]).toContain('5h')
   await measure($, w, 97, 10) // still above: nothing new
   expect(ceilingToasts(w)).toHaveLength(1)
-  await measure($, w, 50, 10) // back below ...
-  await measure($, w, 96, 10) // ... and across again
+  await measure($, w, 50, 10, 5 * H) // back below in the next 5-hour window ...
+  await measure($, w, 96, 10, 5 * H) // ... and across again
   expect(ceilingToasts(w)).toHaveLength(2)
 })
 
@@ -118,8 +118,8 @@ test('toast_weekly_ceiling_and_the_ceiling_options', OPTS({ ceilingFiveHour: 50,
   await measure($, w, 10, 61)
   expect(ceilingToasts(w)).toHaveLength(1)
   expect(ceilingToasts(w)[0]).toContain('7d')
-  await measure($, w, 10, 10)
-  await measure($, w, 51, 10)
+  await measure($, w, 10, 10, 7 * D) // the next week
+  await measure($, w, 51, 10, 7 * D)
   expect(ceilingToasts(w)).toHaveLength(2)
 })
 
@@ -312,15 +312,15 @@ test('dw10_nudge_attaches_once_per_entry_into_claude_tight', async ($, on) => {
   await submit($)
   expect(w.contexts.slice(1)).toEqual([expect.anything(), undefined, undefined]) // once
 
-  await measure($, w, 20, 20) // gap 20: between 10 and 25, still in the state, nothing new
+  await measure($, w, 20, 20, 7 * D) // next windows, gap 20: between 10 and 25, still in the state, nothing new
   await submit($)
   expect(w.contexts.at(-1)).toBeUndefined()
 
-  await measure($, w, 5, 5) // gap 5 < 10: leave
+  await measure($, w, 5, 5, 14 * D) // gap 5 < 10: leave
   await submit($)
   expect(w.contexts.at(-1)).toBeUndefined()
 
-  await measure($, w, 40, 40) // enter again: one more
+  await measure($, w, 40, 40, 14 * D) // enter again: one more
   await submit($)
   expect(w.contexts.at(-1)![0]).toMatch(NUDGE)
   await submit($)
@@ -711,3 +711,12 @@ for (const [id, tool] of [['mcp', 'mcp__srv__lookup'], ['skill', 'Skill'], ['sen
     expect(w.agentCalls).toHaveLength(1)
   })
 }
+
+// ---------- stale first measurement (dw25) ----------
+
+test('dw25_a_stale_measure_for_the_same_windows_does_not_lower_the_row_or_the_store', async ($, on) => {
+  const w = world(on, { 'reading/claude': reading({ fiveUsed: 66, sevenUsed: 10 }), 'reading/codex': reading({ fiveUsed: 15, sevenUsed: 2 }) })
+  await measure($, w, 36, 6)
+  expect(w.statuses.at(-1)).toBe('C 5h 66 · 7d 10 │ X 5h 15 · 7d 2')
+  expect((w.store.get('reading/claude') as any).fiveHour.used).toBe(66)
+})

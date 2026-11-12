@@ -107,7 +107,7 @@ Interrupting a foreground run ends the hook's wait and kills the process, then r
 
 ## Where readings come from
 
-Both providers are reduced to one shape: used percent, reset time and length for each window, plus a read time and a limit flag. The readings are kept in the shared store (`reading/claude`, `reading/codex`), so every Claude Code session on the machine sees the freshest one. The Codex reading is also memoised in each session for 30 seconds.
+Both providers are reduced to one shape: used percent, reset time and length for each window, plus a read time and a limit flag. The readings are kept in the shared store (`reading/claude`, `reading/codex`), so every Claude Code session on the machine sees the freshest one. Claude's stored and live readings are merged window by window rather than by arrival: usage inside one window only rises, so for the same window (resets less than half a window apart) the higher figure wins, and otherwise the window that resets later. This matters because the engine's first usage measurement after a session starts or resumes repeats that session's last reported figures, which can be hours old: a resumed session that last saw 36% must not replace a reading of 66% for the same window. The Codex reading is also memoised in each session for 30 seconds.
 
 Claude: the live `$.session.usage()` figures (five-hour and seven-day windows only; spend limits are ignored), merged with the stored reading. Each `session.measure` saves the live reading; Claude's limit is read from these usage windows. A limit flag stored by an older version is carried over until its reset. Per-model weekly caps are not visible.
 

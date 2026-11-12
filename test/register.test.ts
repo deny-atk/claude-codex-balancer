@@ -553,7 +553,7 @@ test('dw2_a_stored_claude_limit_survives_the_next_measure_until_its_reset', asyn
 
 test('dw2_the_live_claude_reading_beats_an_older_stored_one', async ($, on) => {
   const w = world(on, {
-    'reading/claude': reading({ fiveUsed: 10, sevenUsed: 10, readAt: NOW - 5 * H }),
+    'reading/claude': reading({ fiveUsed: 10, fiveLeft: -H, sevenUsed: 10, readAt: NOW - 5 * H }), // read 5 h ago: its 5-hour window has reset
     'reading/codex': reading({ fiveUsed: 70, sevenUsed: 70 }),
   }, { usage: [{ kind: 'five_hour', percentUsed: 97, resetsAt: new Date(NOW + 2 * H).toISOString() }] })
   await $.tool.call(agent() as any)
