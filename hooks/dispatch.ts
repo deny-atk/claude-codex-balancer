@@ -291,7 +291,7 @@ async function optedOut($: EngineInterface): Promise<boolean> {
 /** The custom type's definition: the first file that exists decides, and it must parse. Null when there is none. */
 async function agentDefFor($: EngineInterface, type: string, cwd: string): Promise<AgentDef | null> {
   const configDir = configDirFor(await $.env.get('CLAUDE_CONFIG_DIR'), await $.env.get('HOME'))
-  for (const path of agentDefPaths(type, cwd, configDir)) {
+  for (const path of agentDefPaths(type, [await $.session.root(), cwd], configDir)) {
     let text: unknown
     try { text = await $.fs.read(path) } catch { continue }
     return typeof text === 'string' ? parseAgentDef(text) : null

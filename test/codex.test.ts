@@ -402,7 +402,14 @@ test('dw5_buildFailureText carries patch, untracked files, partial notes and the
 const DEF = (fm: string, body = 'BODY') => `---\n${fm}\n---\n${body}\n`
 
 test('dw17_agent_paths_are_project_then_user_by_file_name', () => {
-  expect(agentDefPaths('implementer', '/p', '/c')).toEqual(['/p/.claude/agents/implementer.md', '/c/agents/implementer.md'])
+  expect(agentDefPaths('implementer', ['/p'], '/c')).toEqual(['/p/.claude/agents/implementer.md', '/c/agents/implementer.md'])
+})
+
+test('dw24_agent_paths_are_root_then_cwd_then_user_without_repeats', () => {
+  expect(agentDefPaths('implementer', ['/r', '/r/wt/backend'], '/c')).toEqual([
+    '/r/.claude/agents/implementer.md', '/r/wt/backend/.claude/agents/implementer.md', '/c/agents/implementer.md',
+  ])
+  expect(agentDefPaths('implementer', ['/p', '/p'], '/c')).toEqual(['/p/.claude/agents/implementer.md', '/c/agents/implementer.md'])
 })
 
 test('dw17_config_dir_is_the_env_value_else_home_dot_claude', () => {
@@ -413,7 +420,7 @@ test('dw17_config_dir_is_the_env_value_else_home_dot_claude', () => {
 
 for (const [id, type] of [['plugin', 'pl:agent'], ['dotdot', '../x'], ['slash', 'a/b'], ['empty', ''], ['dot', '.hidden']] as const) {
   test(`dw18_agent_paths_none_for_${id}_type`, () => {
-    expect(agentDefPaths(type, '/p', '/c')).toEqual([])
+    expect(agentDefPaths(type, ['/p'], '/c')).toEqual([])
   })
 }
 

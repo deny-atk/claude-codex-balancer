@@ -34,6 +34,7 @@ export type World = {
   finalText: string
   failMessage: string // message of the stub's turn.failed event
   cwdExists: boolean
+  root: string // what $.session.root() answers; CWD unless a test moves the cwd under another project root
   loggedIn: boolean
   loginThrows: boolean // `codex login status` cannot even start (binary missing)
   tracked: Set<string> // paths `git ls-files` knows
@@ -90,7 +91,7 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
-    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [],
+    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [],
     gate: undefined as any, openGate: () => {},
     git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
@@ -100,7 +101,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   mock.env(on, { HOME, CLAUDE_CONFIG_DIR: CFG })
 
   on('session.cwd', () => ({ value: CWD }))
-  on('session.root', () => ({ value: CWD }))
+  on('session.root', () => ({ value: w.root }))
   on('session.id', () => ({ value: SID }))
   on('session.usage', () => ({ value: { rateLimits: w.usage } }))
 

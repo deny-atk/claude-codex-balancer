@@ -10,13 +10,14 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
 
 /**
- * Where to look for a custom type's file, in order: the project, then the user's config folder.
+ * Where to look for a custom type's file, in order: each project folder given (the session's root, where Claude Code
+ * loaded its agents, then the cwd, which a shell `cd` into a worktree can move away from them), then the user's config folder.
  * Empty for a plugin type (`plugin:agent`) and for anything that is not a plain file name.
- * shortcut: agent file looked up by file name only, not by the name field or subfolders; replace if agents live in subfolders
+ * shortcut: agent file looked up by file name only, not by the name field, subfolders or parent folders; replace if agents live there
  */
-export function agentDefPaths(type: string, cwd: string, configDir: string): string[] {
+export function agentDefPaths(type: string, projectDirs: readonly string[], configDir: string): string[] {
   if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(type)) return []
-  return [`${cwd}/.claude/agents/${type}.md`, `${configDir}/agents/${type}.md`]
+  return [...new Set([...projectDirs.map(d => `${d}/.claude/agents/${type}.md`), `${configDir}/agents/${type}.md`])]
 }
 
 export function configDirFor(configDir: string | undefined, home: string | undefined): string {

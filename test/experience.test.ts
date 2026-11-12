@@ -539,6 +539,28 @@ test('dw17_project_file_wins_over_the_user_file', async ($, on) => {
   expect(argAfter(w, '-s')).toBe('read-only')
 })
 
+// A session that started in /root and then worked in a git worktree subfolder: the worktree has no
+// `.claude/agents/` (the folder is git-excluded), but Claude Code loaded the agent from the project root.
+test('dw24_project_root_file_is_found_when_the_cwd_has_none', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.root = '/root'
+  w.files.set('/root/.claude/agents/implementer.md', agentFile('tools: Read, Edit', 'ROOT-BODY'))
+  const r: any = await $.tool.call(custom())
+  expect(r.result.status).toBe('completed')
+  expect(w.spawns).toHaveLength(1)
+  expect(sentPrompt(w)).toContain('ROOT-BODY')
+})
+
+test('dw24_project_root_file_wins_over_the_cwd_file', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.root = '/root'
+  w.files.set('/root/.claude/agents/implementer.md', agentFile('', 'ROOT-BODY'))
+  w.files.set(PROJECT_FILE, agentFile('', 'CWD-BODY'))
+  await $.tool.call(custom())
+  expect(sentPrompt(w)).toContain('ROOT-BODY')
+  expect(sentPrompt(w)).not.toContain('CWD-BODY')
+})
+
 test('dw17_the_other_eligibility_rules_still_apply_to_custom_types', async ($, on) => {
   const w = world(on, CODEX_AHEAD)
   w.files.set(PROJECT_FILE, agentFile(''))
