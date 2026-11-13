@@ -1,5 +1,5 @@
 // Agent routing and execution (PRD 8, decisions D1). All state is per load (one closure), so tests do not share it.
-import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionMeasureInput, ToolCallInput } from 'claude-code'
+import type { EngineInterface, Next, PluginOptions, PromptSubmitInput, SessionMeasureInput, ToolCallInput, TurnCompleteInput } from 'claude-code'
 import { agentDefPaths, CAPABILITY_RE, codexEffort, configDirFor, defModel, parseAgentDef, unavailableTools } from './agentdef'
 import type { AgentDef } from './agentdef'
 import {
@@ -27,6 +27,9 @@ type TaskStopCall = Extract<ToolCallInput, { tool: 'TaskStop' }>
 const MIN_MS = 60_000
 const COOLDOWN_MS = 15 * MIN_MS
 const RECHECK_UNAVAILABLE_MS = 10 * MIN_MS
+const CLAUDE_INFLIGHT = 'claude-inflight'
+// Well beyond the task timeout, so active runs keep their files.
+const RUN_FILE_MAX_AGE_MS = 7 * 24 * 60 * MIN_MS
 
 export type Opts = ReturnType<typeof readOptions>
 type Provider = 'claude' | 'codex'
@@ -113,6 +116,8 @@ export function createState(options: PluginOptions) {
     logQueue: serial(),
     recent: [] as DecisionEntry[],
     runs: new Map<string, { ac: AbortController; sessionId: string; description: string; done: Promise<void> }>(),
+    claudeReservations: new Map<string, string>(),
+    claudeAgents: new Map<string, string>(),
     sessionMode: undefined as Mode | undefined,
     cooldownUntil: 0,
     broken: false, // spawn failed: Codex is unusable for the rest of the session
@@ -133,6 +138,17 @@ const modeNow = (st: State): Mode => st.sessionMode ?? st.opts.mode
 async function dataDir($: EngineInterface, st: State): Promise<string> {
   if (st.dir === undefined) st.dir = dataDirFor(await $.env.get('CLAUDE_CONFIG_DIR'), await $.env.get('HOME'))
   return st.dir
+}
+
+export async function pruneRuns($: EngineInterface, st: State): Promise<void> {
+  try {
+    const dir = `${await dataDir($, st)}/runs`
+    const now = await $.clock.now()
+    const paths = (await $.fs.list(dir))
+      .filter(e => e.kind === 'file' && /^codex-[0-9a-f-]+\.(txt|last\.txt|full\.txt|partial\.txt|patch)$/.test(e.name) && now - e.mtimeMs > RUN_FILE_MAX_AGE_MS)
+      .map(e => `${dir}/${e.name}`)
+    if (paths.length) await $.process.run(['rm', '-f', '--', ...paths])
+  } catch { /* Missing directories and cleanup failures do not prevent startup. */ }
 }
 
 // ---------- readings ----------
@@ -343,15 +359,16 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     const list = wantCodex ? await listInflight($, now, st.opts.taskTimeoutMs) : []
     const estimate = await loadEstimate($, type)
     const reserved = sumReserved(list)
+    const claudeReserved = sumReserved(await listInflight($, now, st.opts.taskTimeoutMs, CLAUDE_INFLIGHT))
     const input = {
       now, mode, config: st.opts.config, claude, codex, claudeCost: st.opts.claudeCost, codexCost: estimate,
-      reserved, inflight: list.length, codexAvailable: usable,
+      reserved, claudeReserved, inflight: list.length, codexAvailable: usable,
     }
     let d: Decision
     if (mode === 'auto' && now < st.cooldownUntil) {
       d = {
         route: 'claude', reason: 'codex-cooldown', refresh: false,
-        claudeAfter: score(claude, now, st.opts.claudeCost),
+        claudeAfter: score(claude, now, { fiveHour: st.opts.claudeCost.fiveHour + claudeReserved.fiveHour, sevenDay: st.opts.claudeCost.sevenDay + claudeReserved.sevenDay }),
         codexAfter: score(codex, now, { fiveHour: reserved.fiveHour + estimate.fiveHour, sevenDay: reserved.sevenDay + estimate.sevenDay }),
       }
     } else d = decide(input)
@@ -360,18 +377,33 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
       claudeAfter: Math.round(d.claudeAfter * 10) / 10, codexAfter: Math.round(d.codexAfter * 10) / 10,
       estimate, mode,
     }
-    const agentId = d.route === 'codex' ? newAgentId() : undefined
-    if (agentId) await reserve($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type }, list)
+    const agentId = newAgentId()
+    if (d.route === 'codex') await reserve($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type }, list)
+    else {
+      await addInflight($, { id: agentId, sessionId, startedAt: now, cost: st.opts.claudeCost, agentType: type }, CLAUDE_INFLIGHT)
+      st.claudeReservations.set(agentId, sessionId)
+    }
     return { d, entry, agentId, codex, estimate }
   })
 
   pushRecent(st.recent, picked.entry)
   st.lastRoute = picked.d.route
   if (picked.d.refresh) void refreshCodex($, st)
-  if (picked.d.route === 'claude' || !picked.agentId) {
-    await writeLog($, st, picked.entry)
-    await observe($, st)
-    return next(e)
+  if (picked.d.route === 'claude') {
+    let background = false
+    try {
+      await writeLog($, st, picked.entry)
+      await observe($, st)
+      const result = await next(e)
+      const value = 'result' in result ? result.result : undefined
+      if (st.claudeReservations.has(picked.agentId) && value && typeof value === 'object' && 'status' in value && value.status === 'async_launched' && 'agentId' in value && typeof value.agentId === 'string') {
+        st.claudeAgents.set(value.agentId, picked.agentId)
+        background = true
+      }
+      return result
+    } finally {
+      if (!background) await quietly(() => releaseClaude($, st, picked.agentId)) // a store error must not replace the call's result
+    }
   }
 
   const agentId = picked.agentId
@@ -574,6 +606,21 @@ export async function onSessionEnd($: EngineInterface, st: State, e: { sessionId
   const mine = [...st.runs.values()].filter(r => r.sessionId === e.sessionId)
   for (const r of mine) r.ac.abort()
   await Promise.allSettled(mine.map(r => r.done))
+  for (const [id, sessionId] of st.claudeReservations) {
+    if (sessionId === e.sessionId) await releaseClaude($, st, id)
+  }
+}
+
+async function releaseClaude($: EngineInterface, st: State, id: string): Promise<void> {
+  st.claudeReservations.delete(id)
+  for (const [agentId, reservationId] of st.claudeAgents) if (reservationId === id) st.claudeAgents.delete(agentId)
+  await removeInflight($, id, CLAUDE_INFLIGHT)
+}
+
+export async function onTurnComplete($: EngineInterface, st: State, e: TurnCompleteInput, next: Next<'turn.complete'>) {
+  const id = e.agentId === undefined ? undefined : st.claudeAgents.get(e.agentId)
+  if (id) await quietly(() => releaseClaude($, st, id))
+  return next(e)
 }
 
 export async function onMeasure($: EngineInterface, st: State, e: SessionMeasureInput) {

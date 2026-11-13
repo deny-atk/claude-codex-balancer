@@ -27,6 +27,9 @@ export type World = {
   toasts: string[]
   submits: string[]
   agentCalls: any[]
+  claudeResult: any
+  runEntries?: any[]
+  processCalls: string[][]
   stopCalls: any[]
   spawns: { argv: readonly string[]; cwd?: string }[]
   spawnFinally: number
@@ -91,7 +94,7 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
-    spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [],
+    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [],
     gate: undefined as any, openGate: () => {},
     git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
@@ -121,6 +124,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   })
   on('fs.write', (_$: any, e: any) => { if (w.failWrites) throw new Error('disk full'); w.files.set(e.path, e.text); w.writes.push(e.path); return { value: undefined } })
   on('fs.list', (_$: any, e: any) => {
+    if (e.path === `${DATA}/runs` && w.runEntries) return { value: w.runEntries }
     const day = rolloutDayDirs(HOME, NOW)
     if (w.rollout !== null && day.includes(e.path)) {
       return { value: e.path === day[0] ? [{ name: `rollout-x-${THREAD}.jsonl`, kind: 'file', size: 1, mtimeMs: NOW, isLink: false }] : [] }
@@ -130,6 +134,8 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
 
   on('process.run', (_$: any, e: any) => {
     const [a, b] = e.argv as string[]
+    w.processCalls.push([...e.argv])
+    if (a === 'rm') return { value: { exitCode: 0, stdout: '', stderr: '' } }
     if (a === 'codex' && b === 'login') { w.loginChecks++; if (w.loginThrows) throw new Error('spawn codex ENOENT'); return { value: { exitCode: w.loggedIn ? 0 : 1, stdout: '', stderr: '' } } }
     if (a === 'git') w.gitCalls.push([...(e.argv as string[])])
     if (a === 'git' && b === 'ls-files') {
@@ -187,7 +193,8 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('prompt.compose', () => { w.compose++; return { sections: SECTIONS } })
   on('prompt.submit', (_$: any, e: any) => { w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
   on('session.compact', (_$: any, e: any) => ({ messages: e.messages }))
-  on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); return { result: CLAUDE_MARK } })
+  on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); if (w.claudeResult instanceof Error) throw w.claudeResult; return { result: w.claudeResult } })
+  on('turn.complete', (_$: any, e: any) => ({ text: e.text }))
   on('tool.call', { tool: 'TaskStop' }, (_$: any, e: any) => { w.stopCalls.push(e); return { result: { message: 'claude-stop', task_id: e.task_id, task_type: 'x' } } })
   on('session.start', async (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))

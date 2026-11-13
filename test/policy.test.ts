@@ -19,7 +19,7 @@ const base = (over: Partial<DecideInput> = {}): DecideInput => ({
   now: NOW, mode: 'auto', config: CONFIG,
   claude: reading(w5(10, 4), w7(10, 100)), codex: reading(w5(10, 4), w7(10, 100)),
   claudeCost: { fiveHour: 1, sevenDay: 0.2 }, codexCost: { fiveHour: 4, sevenDay: 0.8 },
-  reserved: ZERO_COST, inflight: 0, codexAvailable: true, ...over,
+  reserved: ZERO_COST, claudeReserved: ZERO_COST, inflight: 0, codexAvailable: true, ...over,
 })
 
 // Worked cases of PRD 7.1 / 7.2.
@@ -30,6 +30,12 @@ test('dw1_score_worked_case_71', () => {
   expect(Math.abs(score(claude71, NOW) - 113)).toBeLessThan(1)
   expect(Math.abs(score(codex71, NOW) - 76)).toBeLessThan(1)
   expect(Math.abs(runway(claude71.fiveHour, FIVE_HOUR_MS, NOW) - 127)).toBeLessThan(1)
+})
+
+test('dw26b_claude_reserved_cost_reduces_both_window_scores', () => {
+  const c = reading(w5(80, 2), w7(0, 168))
+  const d = decide(base({ claude: c, claudeReserved: { fiveHour: 3, sevenDay: 2 } }))
+  expect(d.claudeAfter).toBe(score(c, NOW, { fiveHour: 4, sevenDay: 2.2 }))
 })
 
 test('dw1_past_resets_at_is_a_reset_window', () => {
@@ -260,7 +266,7 @@ const genInput = (r: Rng): DecideInput => ({
   now: NOW, mode: pick<Mode>(r, ['auto', 'auto', 'auto', 'claude', 'codex', 'off']),
   config: { margin: r() * 20, ceilingFiveHour: 80 + r() * 20, ceilingSevenDay: 80 + r() * 20, maxConcurrentCodex: 1 + Math.floor(r() * 4) },
   claude: r() < 0.9 ? genReading(r) : null, codex: r() < 0.9 ? genReading(r) : null,
-  claudeCost: genCost(r), codexCost: genCost(r), reserved: r() < 0.5 ? ZERO_COST : genCost(r),
+  claudeCost: genCost(r), codexCost: genCost(r), reserved: r() < 0.5 ? ZERO_COST : genCost(r), claudeReserved: ZERO_COST,
   inflight: Math.floor(r() * 4), codexAvailable: r() < 0.9,
 })
 const forAll = (seed: number, body: (r: Rng) => void) => { const r = mulberry32(seed); for (let i = 0; i < CASES; i++) body(r) }

@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 import {
-  createState, onAgent, onBalance, onCodexCommand, onMeasure, onPromptSubmit, onSessionEnd, onTaskStop,
+  createState, onAgent, onBalance, onCodexCommand, onMeasure, onPromptSubmit, onSessionEnd, onTaskStop, onTurnComplete, pruneRuns,
 } from './dispatch'
 import { onToolRow } from './ui'
 
@@ -18,6 +18,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'balance', description: 'Show Balancer routing state, or set its mode for this session', argumentHint: '[auto|claude|codex|off]' })
     await $.command.register({ name: 'codex', description: 'Run a task on Codex and print its report (no Claude model call)', argumentHint: '<task>' })
+    await pruneRuns($, st)
     return next(e)
   })
 
@@ -28,6 +29,8 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Agent' }, ($, e, next) => onAgent($, st, e, next))
 
   on('tool.call', { tool: 'TaskStop' }, ($, e, next) => onTaskStop($, st, e, next))
+
+  on('turn.complete', ($, e, next) => onTurnComplete($, st, e, next))
 
   on('session.end', async ($, e, next) => {
     await onSessionEnd($, st, e)

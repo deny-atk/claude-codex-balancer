@@ -40,6 +40,7 @@ export type DecideInput = {
   now: number; mode: Mode; config: PolicyConfig
   claude: ProviderReading | null; codex: ProviderReading | null
   claudeCost: Cost; codexCost: Cost
+  claudeReserved: Cost
   reserved: Cost // sum of Codex reservations of tasks in flight
   inflight: number // Codex tasks in flight across sessions
   codexAvailable: boolean // installed and logged in
@@ -68,7 +69,10 @@ function claudeAtCeiling(i: DecideInput): boolean {
 }
 
 export function decide(i: DecideInput): Decision {
-  const claudeAfter = score(i.claude, i.now, i.claudeCost)
+  const claudeAfter = score(i.claude, i.now, {
+    fiveHour: i.claudeCost.fiveHour + i.claudeReserved.fiveHour,
+    sevenDay: i.claudeCost.sevenDay + i.claudeReserved.sevenDay,
+  })
   const codexAfter = score(i.codex, i.now, {
     fiveHour: i.reserved.fiveHour + i.codexCost.fiveHour,
     sevenDay: i.reserved.sevenDay + i.codexCost.sevenDay,

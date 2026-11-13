@@ -18,6 +18,50 @@ const contextMeasure = ($: any, tokens?: number) => $.session.measure({
   context: { tokens, window: 1000 }, rateLimits: [], changed: ['context'],
 })
 
+test('dw26a_claude_background_is_reserved_separately', OPTS({ mode: 'claude' }), async ($, on) => {
+  const w = world(on, {}, { claudeResult: { status: 'async_launched', agentId: 'bg' } })
+  await $.tool.call(agent() as any)
+  const keys = [...w.store.keys()].filter(k => k.startsWith('claude-inflight/'))
+  expect(keys).toHaveLength(1)
+  expect(w.store.get(keys[0]!)).toMatchObject({ sessionId: SID, startedAt: NOW, cost: { fiveHour: 1, sevenDay: 0.2 }, agentType: 'Explore' })
+  expect(inflightKeys(w)).toHaveLength(0)
+})
+
+test('dw26b_each_concurrent_claude_call_scores_existing_reservations', OPTS({ mode: 'claude' }), async ($, on) => {
+  const w = world(on, { 'reading/claude': reading({ fiveUsed: 80, fiveLeft: 2 * H, sevenUsed: 0 }) }, { claudeResult: { status: 'async_launched', agentId: 'bg' } })
+  await $.tool.call(agent() as any)
+  await $.tool.call(agent() as any)
+  await $.tool.call(agent() as any)
+  expect(logLines(w).map(x => x.claudeAfter)).toEqual([47.5, 45, 42.5])
+})
+
+test('dw26c_background_completion_and_foreground_release', OPTS({ mode: 'claude' }), async ($, on) => {
+  const w = world(on, {}, { claudeResult: { status: 'async_launched', agentId: 'bg' } })
+  await $.tool.call(agent() as any)
+  expect([...w.store.keys()].filter(k => k.startsWith('claude-inflight/'))).toHaveLength(1)
+  await ($ as any).turn.complete({ agentId: 'bg', reason: 'error', text: '' })
+  expect([...w.store.keys()].filter(k => k.startsWith('claude-inflight/'))).toHaveLength(0)
+  w.claudeResult = { status: 'completed' }
+  await $.tool.call(agent() as any)
+  expect([...w.store.keys()].filter(k => k.startsWith('claude-inflight/'))).toHaveLength(0)
+})
+
+test('dw26d_expired_and_session_reservations_are_removed', OPTS({ mode: 'claude' }), async ($, on) => {
+  const stale = { id: 'old', sessionId: 'other', startedAt: NOW - H, cost: { fiveHour: 1, sevenDay: 0.2 }, agentType: 'Explore' }
+  const w = world(on, { 'claude-inflight/old': stale }, { claudeResult: { status: 'async_launched', agentId: 'bg' } })
+  await $.tool.call(agent() as any)
+  expect(w.store.has('claude-inflight/old')).toBe(false)
+  await $.session.end({ reason: 'other', sessionId: SID, resume: { id: SID } } as any)
+  expect([...w.store.keys()].filter(k => k.startsWith('claude-inflight/'))).toHaveLength(0)
+})
+
+test('dw27_prunes_only_old_matching_regular_run_files', async ($, on) => {
+  const entry = (name: string, age: number, kind = 'file') => ({ name, kind, mtimeMs: NOW - age, size: 1, isLink: false })
+  const w = world(on, {}, { runEntries: [entry('codex-ab-12.last.txt', 8 * D), entry('codex-ab.txt', D), entry('other.txt', 8 * D), entry('codex-ab.patch', 8 * D, 'dir')] })
+  await startSession($)
+  expect(w.processCalls.filter(c => c[0] === 'rm')).toEqual([['rm', '-f', '--', `${DATA}/runs/codex-ab-12.last.txt`]])
+})
+
 for (const fallback of ['', 'gpt-command']) {
   test(`dw2_codex_command_uses_only_codex_model_${fallback || 'empty'}`, OPTS({ codexModel: fallback, modelMap: 'default=gpt-mapped' }), async ($, on) => {
     const w = world(on, CODEX_AHEAD)

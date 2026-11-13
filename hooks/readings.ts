@@ -201,17 +201,17 @@ export function saveEstimate($: EngineInterface, agentType: string, c: Cost) {
   return $.store.set(`estimate/${agentType}`, c)
 }
 
-export function addInflight($: EngineInterface, rec: Inflight) {
-  return $.store.set(`inflight/${rec.id}`, rec)
+export function addInflight($: EngineInterface, rec: Inflight, prefix = 'inflight') {
+  return $.store.set(`${prefix}/${rec.id}`, rec)
 }
-export function removeInflight($: EngineInterface, id: string) {
-  return $.store.delete(`inflight/${id}`)
+export function removeInflight($: EngineInterface, id: string, prefix = 'inflight') {
+  return $.store.delete(`${prefix}/${id}`)
 }
 
-export async function listInflight($: EngineInterface, now: number, timeoutMs: number): Promise<Inflight[]> {
+export async function listInflight($: EngineInterface, now: number, timeoutMs: number, prefix = 'inflight'): Promise<Inflight[]> {
   const out: Inflight[] = []
   for (const key of await $.store.keys()) {
-    if (!key.startsWith('inflight/')) continue
+    if (!key.startsWith(`${prefix}/`)) continue
     const v = await $.store.get(key)
     if (isObj(v) && typeof v.startedAt === 'number' && isCost(v.cost) && now - v.startedAt <= timeoutMs) out.push(v as Inflight)
     else await $.store.delete(key)

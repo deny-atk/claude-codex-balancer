@@ -50,6 +50,8 @@ Three eligible subagents start in one message. The second sees the first's 5-poi
 
 A reservation is one store key per running Codex task (`inflight/<id>`) holding its estimated cost. It is removed when the task ends and ignored once older than `taskTimeoutMinutes`.
 
+Claude-routed tasks reserve the configured Claude cost under `claude-inflight/<id>`, separately from Codex concurrency and the in-flight list. Live reservations from all sessions are added to Claude's score. Foreground reservations are removed when the call settles; background reservations remain until the agent's turn completes. Session end removes this load's reservations, and listing drops reservations older than `taskTimeoutMinutes`.
+
 The Codex estimate is an exponentially weighted average (alpha 0.3) per subagent type and window, seeded at 5 points (5h) and 1 point (7d). A sample is the change in `used` across a run. It counts only if both readings belong to the same window instance (reset times within 60 seconds), no other Balancer task overlapped, and the change is not negative. A task counts as overlapped when another Codex task was running at any moment of its run, including one that started and ended inside it. Each reservation carries an `overlapped` flag: a task that reserves while others run sets it on its own record and on every other record in flight, and at its end a run reads its own flag. Say task A starts, task B starts and finishes inside A, and A finishes with usage up 10 points: A's flag was set when B reserved, so neither run changes the estimate. An aborted run adds no sample.
 
 ## Foreground and background
@@ -176,7 +178,8 @@ Routing to Codex is on in every project. A brief sent to Codex goes to OpenAI, a
 ## Data folders
 
 - Data folder: `$CLAUDE_CONFIG_DIR/plugins/data/balancer/`, or `$HOME/.claude/plugins/data/balancer/` when that variable is unset. It holds `decisions.jsonl` and `runs/` with, per run, `<agentId>.txt` (the background output file, or the full text of a cut foreground report), `<agentId>.full.txt` (full text of a cut background report) and `<agentId>.last.txt` (Codex's own last-message file; Balancer writes it empty first, because Codex does not create the `runs/` folder).
-- Shared store (the engine's per-plugin JSON file): `reading/claude`, `reading/codex`, `estimate/<agent type>`, `inflight/<id>`. Writes are last-write-wins, one key per item.
+- On session start, matching Codex run files older than seven days are pruned from `runs/`; missing folders and cleanup failures are ignored.
+- Shared store (the engine's per-plugin JSON file): `reading/claude`, `reading/codex`, `estimate/<agent type>`, `inflight/<id>`, `claude-inflight/<id>`. Writes are last-write-wins, one key per item.
 
 ## Developing and checking
 
