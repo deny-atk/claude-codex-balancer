@@ -9,7 +9,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, parseGitRoots, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
+  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, namedWorktrees, parseGitRoots, parseWorktrees, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate } from './policy'
@@ -26,6 +26,7 @@ type TaskStopCall = Extract<ToolCallInput, { tool: 'TaskStop' }>
 
 const MIN_MS = 60_000
 const COOLDOWN_MS = 15 * MIN_MS
+const REPEAT_WINDOW_MS = 30 * MIN_MS // a blocked call's repeat goes to Claude within this time
 const RECHECK_UNAVAILABLE_MS = 10 * MIN_MS
 const CLAUDE_INFLIGHT = 'claude-inflight'
 // Well beyond the task timeout, so active runs keep their files.
@@ -91,6 +92,7 @@ type Task = {
   estimate: Cost; codexBefore: ProviderReading | null
   entry: DecisionEntry
   gitCwd?: string // set by runTask: the repository's top folder, where git paths are relative
+  worktrees?: string[] // set by runTask: sibling worktrees the brief named, writable and in the change check
 }
 
 type Settled =
@@ -102,7 +104,13 @@ type Settled =
 type Saved = { patchPath?: string; untracked?: string[]; partial?: { text: string; path?: string }; resumeThreadId?: string }
 type RunRecord = Pick<Task, 'agentId' | 'sessionId' | 'description' | 'rowId' | 'sandbox' | 'outFile' | 'base' | 'type' | 'entry'> & {
   background: boolean; gitCwd: string; before: string[] | null; startedAt: number
+  worktrees?: string[] // absent in records written before 0.2.12
 }
+
+// A blocked Codex run that Balancer did not redo. The session's repeat of the call (same type, and the same description
+// or brief) goes to Claude once, so the task is not sent back to the sandbox that blocked it.
+type BlockedCall = { sessionId: string; type: string; description: string; prompt: string; until: number }
+const sameDescription = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase()
 
 const failureText = (s: { reason: string; changed: string[] | null; sandbox: Sandbox; saved: Saved }) =>
   buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox, ...s.saved })
@@ -129,6 +137,7 @@ export function createState(options: PluginOptions) {
     runs: new Map<string, { ac: AbortController; sessionId: string; description: string; done: Promise<void> }>(),
     reconciled: false, // leftover run records are checked once per module instance
     reconciling: new Set<string>(), // agent ids this instance already reported lost
+    blockedCalls: [] as BlockedCall[], // module memory: a reload forgets them
     claudeReservations: new Map<string, string>(),
     claudeAgents: new Map<string, string>(),
     sessionMode: undefined as Mode | undefined,
@@ -186,7 +195,7 @@ async function lostRun($: EngineInterface, st: State, record: RunRecord, current
   let notes = ''
   if (record.sandbox === 'workspace-write') {
     changed = null
-    await quietly(async () => { changed = changedSince(record.before, await gitSnapshot($, record.gitCwd)) })
+    await quietly(async () => { changed = changedSince(record.before, await snapshotAll($, record.gitCwd, record.worktrees ?? [])) })
   }
   await quietly(async () => { notes = await $.fs.read(record.outFile) })
   await quietly(() => setRun($, record.rowId, null))
@@ -456,9 +465,10 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     const excluded = mode === 'claude' ? undefined
       : st.opts.excluded.has(type) ? 'agent-excluded' as const
       : modelExcluded(model, st.opts.excludedModels) ? 'model-excluded' as const : undefined
-    if (excluded || (mode === 'auto' && now < st.cooldownUntil)) {
+    const repeat = !excluded && mode !== 'claude' && takeRepeat(st, sessionId, type, e.description, e.prompt, now)
+    if (excluded || repeat || (mode === 'auto' && now < st.cooldownUntil)) {
       d = {
-        route: 'claude', reason: excluded ?? 'codex-cooldown', refresh: false,
+        route: 'claude', reason: excluded ?? (repeat ? 'codex-blocked-repeat' as const : 'codex-cooldown'), refresh: false,
         claudeAfter: score(claude, now, { fiveHour: st.opts.claudeCost.fiveHour + claudeReserved.fiveHour, sevenDay: st.opts.claudeCost.sevenDay + claudeReserved.sevenDay }),
         codexAfter: score(codex, now, { fiveHour: reserved.fiveHour + estimate.fiveHour, sevenDay: reserved.sevenDay + estimate.sevenDay }),
       }
@@ -524,6 +534,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
       try { await reserveClaude($, st, reservation, sessionId, type, await $.clock.now()) } catch { return await next(e) }
       return await nextOnClaude($, st, reservation, e, next)
     }
+    if (s.reason === 'blocked') await quietly(() => armRepeat($, st, task))
     return { result: completedRecord({ agentId, text: failureText(s), prompt: e.prompt, durationMs: 0, agentType: type }) }
     } finally {
       await quietly(() => $.store.delete(`run/${agentId}`))
@@ -552,7 +563,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
 
 // Where Codex may write and where git is asked, for a workspace-write run (DW29, DW30). `gitCwd` is the repository's top
 // folder when there is one, since git status paths are relative to it. Grants come only from the user's data folder.
-async function writableRoots($: EngineInterface, st: State, cwd: string): Promise<{ gitCwd: string; addDirs: string[] }> {
+async function writableRoots($: EngineInterface, st: State, cwd: string, prompt: string): Promise<{ gitCwd: string; addDirs: string[]; worktrees: string[] }> {
   const home = await $.env.get('HOME')
   const usable = async (d: string) => {
     if (!safeDirSyntax(d, home)) return false
@@ -565,9 +576,21 @@ async function writableRoots($: EngineInterface, st: State, cwd: string): Promis
   } catch { /* not a repository */ }
   const root = await $.session.root()
   const dirs: string[] = []
+  const worktrees: string[] = []
   if (roots) {
     const top = roots.toplevel.replace(/\/+/g, '/')
     if (top !== cwd.replace(/\/+/g, '/') && (await usable(top))) dirs.push(top)
+    // A brief that names a sibling linked worktree of this repository (the shell in one checkout, the work in another)
+    // makes that worktree writable. Only roots git lists for this repository qualify, never a path taken from the brief.
+    try {
+      const listed = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: roots.toplevel })
+      if (listed.exitCode === 0) {
+        for (const d of namedWorktrees(prompt, parseWorktrees(listed.stdout))) {
+          if (d !== top && (await usable(d))) worktrees.push(d)
+        }
+      }
+    } catch { /* none named */ }
+    dirs.push(...worktrees)
   } else {
     const normalizedRoot = root.replace(/\/+/g, '/')
     if (cwd.replace(/\/+/g, '/').startsWith(normalizedRoot.replace(/\/+$/, '') + '/') && (await usable(normalizedRoot))) dirs.push(normalizedRoot)
@@ -578,20 +601,35 @@ async function writableRoots($: EngineInterface, st: State, cwd: string): Promis
     const d = grant.replace(/\/+/g, '/')
     if (await usable(d)) dirs.push(d)
   }
-  return { gitCwd: roots?.toplevel ?? cwd, addDirs: [...new Set(dirs)] }
+  return { gitCwd: roots?.toplevel ?? cwd, addDirs: [...new Set(dirs)], worktrees }
+}
+
+// The change check: the shell's repository plus each brief-named worktree, whose lines carry its root so the paths name
+// the right folder. One unreadable status makes the whole check unknown, never "nothing changed".
+async function snapshotAll($: EngineInterface, gitCwd: string, worktrees: readonly string[]): Promise<string[] | null> {
+  const all = await gitSnapshot($, gitCwd)
+  for (const wt of worktrees) {
+    if (!all) return null
+    const s = await gitSnapshot($, wt)
+    if (!s) return null
+    all.push(...s.map(l => `${wt}/${l}`))
+  }
+  return all
 }
 
 async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSignal, fullTextPath: string, background: boolean): Promise<Settled> {
   const git = c.sandbox === 'workspace-write'
   // nothing here may throw before the run owns its reservation
-  const roots = git ? await writableRoots($, st, c.cwd).catch(() => ({ gitCwd: c.cwd, addDirs: [] as string[] })) : { gitCwd: c.cwd, addDirs: [] as string[] }
+  const none = { gitCwd: c.cwd, addDirs: [] as string[], worktrees: [] as string[] }
+  const roots = git ? await writableRoots($, st, c.cwd, c.prompt).catch(() => none) : none
   c.gitCwd = roots.gitCwd
+  c.worktrees = roots.worktrees
   let run: CodexRun
   let before: string[] | null = null
   let overlapped = false
   try {
-    if (git) before = await gitSnapshot($, roots.gitCwd)
-    const record: RunRecord = { agentId: c.agentId, sessionId: c.sessionId, description: c.description, background, ...(c.rowId ? { rowId: c.rowId } : {}), sandbox: c.sandbox, gitCwd: roots.gitCwd, before, outFile: c.outFile, base: c.base, startedAt: await $.clock.now(), type: c.type, entry: c.entry }
+    if (git) before = await snapshotAll($, roots.gitCwd, roots.worktrees)
+    const record: RunRecord = { agentId: c.agentId, sessionId: c.sessionId, description: c.description, background, ...(c.rowId ? { rowId: c.rowId } : {}), sandbox: c.sandbox, gitCwd: roots.gitCwd, worktrees: roots.worktrees, before, outFile: c.outFile, base: c.base, startedAt: await $.clock.now(), type: c.type, entry: c.entry }
     await quietly(() => $.store.set(`run/${c.agentId}`, record))
     // Codex does not create the folder of its -o file; $.fs.write makes missing parents.
     try { await $.fs.write(c.outFile, '') } catch { /* best effort */ }
@@ -650,7 +688,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   await quietly(() => observe($, st))
 
   if (run.outcome === 'aborted') return { kind: 'aborted' }
-  const afterGit = git ? await gitSnapshot($, roots.gitCwd) : null
+  const afterGit = git ? await snapshotAll($, roots.gitCwd, roots.worktrees) : null
   if (run.outcome === 'ok' && run.finalMessage !== undefined) {
     const cut = run.finalMessage.length > st.opts.maxResultChars
     if (cut) { try { await $.fs.write(fullTextPath, run.finalMessage) } catch { /* the report still says it was cut */ } }
@@ -668,7 +706,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
 }
 
 // Best effort, never throws: a failed write or git call changes nothing but what the text can name.
-async function saveWork($: EngineInterface, c: Pick<Task, 'base' | 'gitCwd' | 'cwd'>, run: CodexRun, changed: string[] | null): Promise<Saved> {
+async function saveWork($: EngineInterface, c: Pick<Task, 'base' | 'gitCwd' | 'cwd' | 'worktrees'>, run: CodexRun, changed: string[] | null): Promise<Saved> {
   const saved: Saved = {}
   if (run.finalMessage) {
     saved.partial = { text: run.finalMessage }
@@ -679,20 +717,34 @@ async function saveWork($: EngineInterface, c: Pick<Task, 'base' | 'gitCwd' | 'c
   }
   if (run.threadId && (run.limitHit || run.outcome === 'timeout')) saved.resumeThreadId = run.threadId
   if (changed && changed.length > 0) {
-    try {
-      const ls = await $.process.run(['git', 'ls-files', '-z', '--', ...changed], { cwd: c.gitCwd ?? c.cwd })
-      if (ls.exitCode === 0) {
+    // A path in a brief-named worktree carries its root: git is asked in that worktree, about the path relative to it.
+    const groups = new Map<string, string[]>()
+    for (const p of changed) {
+      const wt = (c.worktrees ?? []).find(d => p.startsWith(d + '/')) ?? ''
+      groups.set(wt, [...(groups.get(wt) ?? []), p])
+    }
+    const patches: string[] = []
+    for (const [wt, paths] of groups) {
+      try {
+        const cwd = wt || (c.gitCwd ?? c.cwd)
+        const rel = wt ? paths.map(p => p.slice(wt.length + 1)) : paths
+        const ls = await $.process.run(['git', 'ls-files', '-z', '--', ...rel], { cwd })
+        if (ls.exitCode !== 0) continue
         const tracked = ls.stdout.split('\0').filter(Boolean)
-        saved.untracked = changed.filter(p => !tracked.includes(p))
+        saved.untracked = [...(saved.untracked ?? []), ...paths.filter((_, i) => !tracked.includes(rel[i]!))]
         if (tracked.length > 0) {
-          const d = await $.process.run(['git', 'diff', 'HEAD', '--', ...tracked], { cwd: c.gitCwd ?? c.cwd })
-          if (d.exitCode === 0 && d.stdout.length > 0) {
-            await $.fs.write(`${c.base}.patch`, d.stdout)
-            saved.patchPath = `${c.base}.patch`
-          }
+          const prefix = wt ? [`--src-prefix=a${wt}/`, `--dst-prefix=b${wt}/`] : []
+          const d = await $.process.run(['git', 'diff', 'HEAD', ...prefix, '--', ...tracked], { cwd })
+          if (d.exitCode === 0 && d.stdout.length > 0) patches.push(d.stdout)
         }
-      }
-    } catch { /* no patch */ }
+      } catch { /* no patch for this folder */ }
+    }
+    if (patches.length > 0) {
+      try {
+        await $.fs.write(`${c.base}.patch`, patches.join(''))
+        saved.patchPath = `${c.base}.patch`
+      } catch { /* no patch */ }
+    }
   }
   return saved
 }
@@ -707,14 +759,15 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
     // Nothing was changed, so the task is redone once on Claude: no cooldown, since Codex itself worked.
     const notes = s.saved.partial ? partialBlock('blocked', s.saved.partial.text) : undefined
     const r = c.noRedo ? { failed: c.noRedo } : await startRedo($, st, c, notes)
+    if (!('agentId' in r)) await quietly(() => armRepeat($, st, c))
     // The engine delivers the redo's own report as its notification; this message only links it to the Codex id the model holds.
     text = 'agentId' in r
       ? `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed. ` +
         `Balancer is redoing it once on Claude as background agent ${r.agentId}; its report will come from that agent.`
       : c.noRedo
       ? `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed. It was not redone on Claude ` +
-        `because the call set ${c.noRedo}, which a redo started by Balancer cannot carry. Delegate it again.` + (notes ? `\n\n${notes}` : '')
-      : `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed, and the Claude redo could not start (${r.failed}). Delegate it again.` +
+        `because the call set ${c.noRedo}, which a redo started by Balancer cannot carry. ${AGAIN}` + (notes ? `\n\n${notes}` : '')
+      : `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed, and the Claude redo could not start (${r.failed}). ${AGAIN}` +
         (notes ? `\n\n${notes}` : '')
   } else if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
     st.cooldownUntil = (await $.clock.now()) + COOLDOWN_MS
@@ -723,10 +776,28 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
       'delegate it again and it will run on Claude.' +
       (s.saved.partial ? `\n\n${partialBlock(s.reason, s.saved.partial.text)}\nPut them in the new brief if they help.` : '')
   } else {
+    if (s.reason === 'blocked') await quietly(() => armRepeat($, st, c))
     text = `[balancer] Background agent "${c.description}" (${c.agentId}): ` +
       failureText(s)
   }
   await $.prompt.submit({ text })
+}
+
+const AGAIN = 'Delegate it again with the same description; that call will run on Claude.'
+
+async function armRepeat($: EngineInterface, st: State, c: Task): Promise<void> {
+  const now = await $.clock.now()
+  st.blockedCalls = st.blockedCalls.filter(b => b.until > now)
+  st.blockedCalls.push({ sessionId: c.sessionId, type: c.type, description: sameDescription(c.description), prompt: c.prompt, until: now + REPEAT_WINDOW_MS })
+}
+
+/** True, once, for the session's repeat of a blocked call that was not redone. */
+function takeRepeat(st: State, sessionId: string, type: string, description: string, prompt: string, now: number): boolean {
+  const i = st.blockedCalls.findIndex(b => b.until > now && b.sessionId === sessionId && b.type === type &&
+    (b.description === sameDescription(description) || b.prompt === prompt))
+  if (i < 0) return false
+  st.blockedCalls.splice(i, 1)
+  return true
 }
 
 // The decision log's line for a redo: the Codex entry's numbers, now routed to Claude.

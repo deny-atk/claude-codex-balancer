@@ -105,6 +105,33 @@ export function projectKey(commonDir: string): string {
   return d.slice(0, d.lastIndexOf('/')) || '/'
 }
 
+/** Worktree roots in `git worktree list --porcelain` output. A bare entry has no files, so it is skipped. */
+export function parseWorktrees(stdout: string): string[] {
+  return stdout.split(/\n\n+/).flatMap(block => {
+    const lines = block.split('\n')
+    const root = lines.find(l => l.startsWith('worktree '))?.slice('worktree '.length)
+    return root && !lines.includes('bare') ? [root.replace(/\/+/g, '/').replace(/(.)\/$/, '$1')] : []
+  })
+}
+
+const PATH_CHAR = /[A-Za-z0-9._~+@/-]/
+/**
+ * The listed roots the brief names: the root itself or a path under it, with no path character on either side (a
+ * sentence's closing period is not one). Only listed roots can come out, never a path taken from the brief.
+ */
+export function namedWorktrees(prompt: string, roots: readonly string[]): string[] {
+  const named = (root: string) => {
+    for (let i = prompt.indexOf(root); i >= 0; i = prompt.indexOf(root, i + 1)) {
+      const before = prompt[i - 1]
+      const rest = prompt.slice(i + root.length)
+      const after = rest[0] === '.' && !PATH_CHAR.test(rest[1] ?? ' ') ? ' ' : rest[0] ?? ' '
+      if ((before === undefined || !PATH_CHAR.test(before)) && (after === '/' || !PATH_CHAR.test(after))) return true
+    }
+    return false
+  }
+  return [...new Set(roots)].filter(r => r.length > 1 && named(r))
+}
+
 /** The folders listed for `key` in the user's `writable-dirs.json`; anything unreadable is no grants. */
 export function grantsFor(text: string | undefined, key: string): string[] {
   if (text === undefined) return []
