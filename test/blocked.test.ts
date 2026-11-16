@@ -30,6 +30,12 @@ const NOT_BLOCKED: [string, string][] = [
 for (const [id, text] of BLOCKED) test(`dw31_is_blocked_${id}`, () => expect(codex.isBlocked(text)).toBe(true))
 for (const [id, text] of NOT_BLOCKED) test(`dw31_is_not_blocked_${id}`, () => expect(codex.isBlocked(text)).toBe(false))
 
+test('dw31_five_nonempty_lines_and_first_line_prefix_boundaries', () => {
+  expect(codex.isBlocked('one\n\ntwo\nthree\n\nfour\nStatus: blocked')).toBe(true)
+  expect(codex.isBlocked('one\ntwo\nthree\nfour\nfive\nStatus: blocked')).toBe(false)
+  expect(codex.isBlocked('one\nBLOCKED: x')).toBe(false)
+})
+
 test('dw31_preamble_asks_for_a_blocked_first_line', () => {
   expect(codex.PREAMBLE).toContain('make the first line of your final message `BLOCKED: <one-line reason>`')
 })
@@ -315,6 +321,16 @@ test('dw37_option_default_and_parsing', () => {
   expect([...readOptions({ excludedAgentTypes: ' a , b,,' }).excluded]).toEqual(['a', 'b'])
 })
 
+test('dw37_custom_exclusion_replaces_default', EXCL({ excludedAgentTypes: 'reviewer-x' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set('/proj/.claude/agents/reviewer-x.md', PLAN_DEF)
+  w.files.set(PLAN_FILE, PLAN_DEF)
+  await $.tool.call(agent({ subagent_type: 'reviewer-x' }) as any)
+  expect(logLines(w)[0]).toMatchObject({ route: 'claude', reason: 'agent-excluded' })
+  await $.tool.call(plan())
+  expect(logLines(w)[1]).toMatchObject({ route: 'codex', reason: 'codex-ahead' })
+})
+
 // ---------- dw40: excluded models ----------
 
 test('dw40_model_matching_alias_and_full_id_forms', () => {
@@ -325,6 +341,14 @@ test('dw40_model_matching_alias_and_full_id_forms', () => {
   ]
   for (const [m, want] of cases) expect([m, codex.modelExcluded(m, set)]).toEqual([m, want])
   expect(codex.modelExcluded('fable', new Set())).toBe(false)
+})
+
+test('dw40_custom_model_exclusion_replaces_default', EXCL({ excludedModels: 'opus' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  await $.tool.call(agent({ model: 'opus' }) as any)
+  expect(logLines(w)[0]).toMatchObject({ route: 'claude', reason: 'model-excluded' })
+  await $.tool.call(agent({ model: 'fable' }) as any)
+  expect(logLines(w)[1]).toMatchObject({ route: 'codex', reason: 'codex-ahead' })
 })
 
 const GP_DEF_FILE = '/proj/.claude/agents/deep-thinker.md'

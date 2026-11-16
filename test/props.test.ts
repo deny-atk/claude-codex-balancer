@@ -2,11 +2,13 @@
 // shortcut: hand-rolled seeded generator, the plugin test runtime cannot import fast-check; replace if it can.
 import { test, expect } from 'claude-code/testing'
 import type { EngineInterface } from 'claude-code'
-import { appendCapped, pushRecent } from '../hooks/balance'
+import { appendCapped, pushRecent, lastDecisions } from '../hooks/balance'
 import type { DecisionEntry } from '../hooks/balance'
 import { createEventParser } from '../hooks/codex'
 import * as codex from '../hooks/codex'
-import { listInflight, parseCodexRolloutTail } from '../hooks/readings'
+import { listInflight, parseCodexRolloutTail, mergeUsage } from '../hooks/readings'
+import { reading } from './harness'
+import { parseAgentDef, unavailableTools } from '../hooks/agentdef'
 import { MARKER, cutRecord, lines, rl, tokenCount } from './fixtures/rollout'
 
 const CASES = 400
@@ -26,6 +28,85 @@ const int = (r: Rng, lo: number, hi: number) => lo + Math.floor(r() * (hi - lo +
 const forAll = (seed: number, body: (r: Rng, i: number) => void) => { const r = mulberry32(seed); for (let i = 0; i < CASES; i++) body(r, i) }
 
 const TEXTS = ['pong', 'a {"b": 1} c', 'line\nbreak', 'é漢字🙂', '', 'You hit your usage limit', 'boom', '\\"quoted\\"']
+
+test('prop_dw30_redundant_separators_preserve_safety', () => {
+  forAll(301, r => {
+    const path = pick(r, ['/home/t', '/home', '/', '/srv/data', '/srv', '/home/t/data'])
+    const repeated = path.replace(/\//g, () => '/'.repeat(1 + int(r, 0, 3)))
+    expect(codex.safeDirSyntax(repeated, '/home/t')).toBe(codex.safeDirSyntax(path, '/home/t'))
+  })
+})
+
+test('prop_dw5_git_c_quoted_paths_round_trip', () => {
+  forAll(302, r => {
+    const chars = ['a', 'é', '漢', '\t', '\n', '"', '\\', ' -> ']
+    const path = Array.from({ length: 1 + int(r, 0, 12) }, () => pick(r, chars)).join('')
+    const quoted = '"' + Array.from(new TextEncoder().encode(path)).map(b => {
+      if (b === 34 || b === 92) return '\\' + String.fromCharCode(b)
+      if (b < 32 || b >= 127) return '\\' + b.toString(8).padStart(3, '0')
+      return String.fromCharCode(b)
+    }).join('') + '"'
+    expect(codex.unquoteGitPath(quoted)).toBe(path)
+  })
+})
+
+test('prop_dw13_last_decisions_selects_the_valid_suffix', () => {
+  forAll(303, r => {
+    const entries = Array.from({ length: 20 }, (_, t) => r() < 0.5
+      ? { t, agentType: 'a', reason: 'r', route: 'claude', claudeAfter: 1, codexAfter: 2 }
+      : { t, route: 'invalid' })
+    const n = int(r, 1, 8)
+    expect(lastDecisions(entries.map(x => JSON.stringify(x)).join('\n'), n).map(x => x.t))
+      .toEqual(entries.filter(x => x.route === 'claude').slice(-n).map(x => x.t))
+  })
+})
+
+test('prop_dw40_model_family_matching', () => {
+  forAll(304, r => {
+    const family = pick(r, ['opus', 'sonnet', 'fable'])
+    const excluded = new Set([family])
+    const id = `${r() < 0.5 ? 'us.anthropic.' : ''}claude-${family}-${int(r, 1, 9)}${r() < 0.5 ? '[1m]' : ''}`
+    expect(codex.modelExcluded(r() < 0.5 ? family.toUpperCase() : family, excluded)).toBe(true)
+    expect(codex.modelExcluded(id.toUpperCase(), excluded)).toBe(true)
+    expect(codex.modelExcluded(`claude-${family}x-1`, excluded)).toBe(false)
+  })
+})
+
+test('prop_dw_reading_merge_uses_max_and_is_idempotent', () => {
+  forAll(305, r => {
+    const a = reading({ fiveUsed: int(r, 0, 100), sevenUsed: int(r, 0, 100) })
+    const b = reading({ fiveUsed: int(r, 0, 100), sevenUsed: int(r, 0, 100) })
+    const merged = mergeUsage(a, b)!
+    expect(merged.fiveHour!.used).toBe(Math.max(a.fiveHour.used, b.fiveHour.used))
+    expect(merged.sevenDay!.used).toBe(Math.max(a.sevenDay.used, b.sevenDay.used))
+    expect(mergeUsage(merged, merged)).toEqual(merged)
+  })
+})
+
+test('prop_dw_agent_tools_list_forms_have_the_same_decisions', () => {
+  forAll(307, r => {
+    const pool = ['Read', 'Edit', 'Write', 'Skill', 'Bash']
+    const tools = pool.filter(() => r() < 0.5)
+    if (tools.length === 0) tools.push('Read')
+    const forms = [tools.join(', '), `[${tools.join(', ')}]`, `\n${tools.map(t => `  - ${t}`).join('\n')}`]
+    const defs = forms.map(form => parseAgentDef(`---\ntools: ${form}\n---\nbody`)!)
+    for (const def of defs) {
+      expect(def.tools).toEqual(tools)
+      expect(codex.sandboxFor('custom', false, def.tools)).toBe(codex.sandboxFor('custom', false, tools))
+      expect(unavailableTools(def)).toBe(unavailableTools(defs[0]!))
+    }
+  })
+})
+
+test('prop_dw31_blocked_matches_reference', () => {
+  forAll(308, r => {
+    const pool = ['', '  ', 'BLOCKED: x', 'Status: blocked', '**Status:** completed', 'A blocked sentence']
+    const lines = Array.from({ length: int(r, 0, 10) }, () => pick(r, pool))
+    const nonempty = lines.filter(line => line.trim()).slice(0, 5)
+    const expected = nonempty[0] === 'BLOCKED: x' || nonempty.includes('Status: blocked')
+    expect(codex.isBlocked(lines.join('\n'))).toBe(expected)
+  })
+})
 
 test('dw3_prop_model_selection_agrees_with_exact_entry_or_fallback', () => {
   forAll(106, r => {

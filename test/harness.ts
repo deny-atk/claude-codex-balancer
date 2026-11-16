@@ -63,6 +63,7 @@ export type World = {
   usage: { kind: string; percentUsed: number; resetsAt?: string }[]
   loginChecks: number
   failWrites: boolean
+  failStoreWrites: boolean
   statuses: (string | undefined)[] // every $.ui.status call, in order
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
   state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
@@ -106,7 +107,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], agentSpawns: [], stopCalls: [],
     claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(),
     gate: undefined as any, openGate: () => {},
-    git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
+    git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false, failStoreWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
   }
   w.gate = new Promise<void>(r => { w.openGate = r })
@@ -119,7 +120,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('session.usage', () => ({ value: { rateLimits: w.usage } }))
 
   on('store.get', (_$: any, e: any) => ({ value: w.store.get(e.key) }))
-  on('store.set', (_$: any, e: any) => { w.store.set(e.key, e.value); return { value: undefined } })
+  on('store.set', (_$: any, e: any) => { if (w.failStoreWrites) throw new Error('store failed'); w.store.set(e.key, e.value); return { value: undefined } })
   on('store.delete', (_$: any, e: any) => { w.store.delete(e.key); return { value: undefined } })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
 

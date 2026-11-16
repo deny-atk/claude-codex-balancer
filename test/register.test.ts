@@ -252,6 +252,14 @@ test('dw5_sync_workspace_write_failure_with_changes_names_the_files', async ($, 
   expect(w.agentCalls).toHaveLength(0)
 })
 
+test('dw5_store_failure_after_run_keeps_changed_file_result', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'limit', git: ['', ' M a.py'] })
+  w.during = () => { w.failStoreWrites = true }
+  const r: any = await $.tool.call(agent({ subagent_type: 'general-purpose' }) as any)
+  expect(w.agentCalls).toHaveLength(0)
+  expect(r.result.content[0].text).toContain('a.py')
+})
+
 test('dw5_sync_workspace_write_failure_outside_git_says_it_could_not_check', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { script: 'fail', git: [null] })
   const r: any = await $.tool.call(agent({ subagent_type: 'general-purpose' }) as any)
@@ -357,6 +365,16 @@ test('dw6_session_end_aborts_runs_of_that_session', async ($, on) => {
   expect(w.spawnFinally).toBe(1)
   expect(inflightKeys(w)).toEqual([])
   expect(w.submits).toEqual([])
+})
+
+test('dw6_session_end_aborts_foreground_run_and_releases_reservation', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { script: 'hang' })
+  const pending = $.tool.call(agent({ run_in_background: false }) as any)
+  await settleReal(() => w.spawns.length > 0)
+  await $.session.end({ reason: 'other', sessionId: SID, resume: { id: SID } } as any)
+  await pending
+  expect(w.spawnFinally).toBe(1)
+  expect(inflightKeys(w)).toEqual([])
 })
 
 // ---------- dw8: reservations ----------
@@ -767,6 +785,8 @@ test('dw12_balance_shows_four_distinct_window_values_under_the_right_provider', 
   const c = at(/^Claude: score/), x = at(/^Codex: score/)
   expect(c).toBeGreaterThanOrEqual(0)
   expect(x).toBeGreaterThan(c)
+  expect(ls[c]).toContain('score 78')
+  expect(ls[x]).toContain('score 56')
   expect(ls[c + 1]).toContain('5h 11% used')
   expect(ls[c + 2]).toContain('7d 22% used')
   expect(ls[x + 1]).toContain('5h 33% used')
@@ -775,7 +795,7 @@ test('dw12_balance_shows_four_distinct_window_values_under_the_right_provider', 
 
 test('dw13_balance_shows_decisions_from_earlier_sessions_in_the_log', async ($, on) => {
   const w = world(on, CODEX_AHEAD)
-  const e = (n: number, agentType: string) => JSON.stringify({ t: NOW - n * 1000, session: 'old', agentType, route: 'claude', reason: 'mode-claude' })
+  const e = (n: number, agentType: string) => JSON.stringify({ t: NOW - n * 1000, session: 'old', agentType, route: 'claude', reason: 'mode-claude', claudeAfter: 1, codexAfter: 2 })
   w.files.set(`${DATA}/decisions.jsonl`, [e(3, 'Old1'), 'not json', '', e(2, 'Old2'), e(1, 'Old3')].join('\n') + '\n')
   await startSession($)
   const { text }: any = await cmd($)

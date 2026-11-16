@@ -214,6 +214,32 @@ test('dw5_run spawn rejection is spawn-error', async () => {
   expect(r.exitCode).toBeNull()
 })
 
+test('dw5_synchronous_spawn_error_cleans_up_abort_listener', async () => {
+  const controller = new AbortController()
+  let listeners = 0
+  const add = controller.signal.addEventListener.bind(controller.signal)
+  const remove = controller.signal.removeEventListener.bind(controller.signal)
+  controller.signal.addEventListener = ((...args: Parameters<typeof add>) => { listeners++; add(...args) }) as typeof add
+  controller.signal.removeEventListener = ((...args: Parameters<typeof remove>) => { listeners--; remove(...args) }) as typeof remove
+  const timers = globalThis as any
+  const originalSet = timers.setTimeout
+  const originalClear = timers.clearTimeout
+  let active = 0
+  timers.setTimeout = (fn: () => void, ms: number) => { active++; return originalSet(fn, ms) }
+  timers.clearTimeout = (handle: unknown) => { active--; originalClear(handle) }
+  try {
+    const result = await runCodex(fake$(() => { throw new Error('spawn failed') }), {
+      argv: ['codex'], cwd: '/w', timeoutMs: 5000, signal: controller.signal,
+    })
+    expect(result.outcome).toBe('spawn-error')
+    expect(listeners).toBe(0)
+    expect(active).toBe(0)
+  } finally {
+    timers.setTimeout = originalSet
+    timers.clearTimeout = originalClear
+  }
+})
+
 test('dw5_run timeout kills the child', async () => {
   const seen = { finally: false }
   const $ = fake$(stubSpawn({ chunks: [], endless: true, slowMs: 30 }, seen))
@@ -305,6 +331,22 @@ test('dw5_gitSnapshot hashes every listed path and changedSince compares content
   expect(calls[1]!.argv).toEqual(['git', 'hash-object', '--', 'a.py', 'b.py', 'new.py', 'q"x.py']) // the deleted path is not hashed
   expect(calls[1]!.init).toEqual({ cwd: '/w' })
   expect(await gitSnapshot($, '/w')).toBeNull()
+})
+
+test('dw5_git_decodes_c_quoted_paths_and_compares_dirty_files', async () => {
+  expect(codex.unquoteGitPath('"caf\\303\\251\\tline\\n\\".txt"')).toBe('café\tline\n".txt')
+  let hash = 'before'
+  const $ = fake$(undefined, async (argv: readonly string[]) => argv[1] === 'status'
+    ? { exitCode: 0, stdout: ' M "caf\\303\\251.txt"\n' }
+    : { exitCode: 0, stdout: `${hash}\n` })
+  const before = await gitSnapshot($, '/w')
+  hash = 'after'
+  const after = await gitSnapshot($, '/w')
+  expect(changedSince(before, after)).toEqual(['café.txt'])
+  const renamed = fake$(undefined, async (argv: readonly string[]) => argv[1] === 'status'
+    ? { exitCode: 0, stdout: 'R  old -> "new -> caf\\303\\251.txt"\n' }
+    : { exitCode: 0, stdout: 'hash\n' })
+  expect(changedSince([], await gitSnapshot(renamed, '/w'))).toEqual(['new -> café.txt'])
 })
 
 test('dw5_gitSnapshot with nothing listed runs no hash and a failed hash marks the path missing', async () => {

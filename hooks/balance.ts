@@ -48,7 +48,12 @@ export function lastDecisions(text: string, max = RECENT_MAX): DecisionEntry[] {
     if (line.trim() === '') continue
     try {
       const v: unknown = JSON.parse(line)
-      if (v !== null && typeof v === 'object' && !Array.isArray(v)) out.push(v as DecisionEntry)
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        const d = v as Record<string, unknown>
+        if (typeof d.t === 'number' && Number.isFinite(d.t) && typeof d.agentType === 'string' &&
+            typeof d.reason === 'string' && (d.route === 'claude' || d.route === 'codex') &&
+            typeof d.claudeAfter === 'number' && typeof d.codexAfter === 'number') out.push(d as DecisionEntry)
+      }
     } catch { /* skip */ }
   }
   return out.slice(-max)

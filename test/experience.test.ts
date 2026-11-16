@@ -75,11 +75,17 @@ for (const fallback of ['', 'gpt-command']) {
 }
 
 test('dw13_last_decisions_keeps_the_last_valid_lines_and_skips_bad_ones', () => {
-  const l = (n: number) => JSON.stringify({ t: n, agentType: 'a', route: 'claude', reason: 'r' })
+  const l = (n: number) => JSON.stringify({ t: n, agentType: 'a', route: 'claude', reason: 'r', claudeAfter: 1, codexAfter: 2 })
   const text = [l(1), l(2), '{broken', '', '"str"', l(3), l(4)].join('\n') + '\n'
   expect(lastDecisions(text, 3).map(d => d.t)).toEqual([2, 3, 4])
   expect(lastDecisions(text, 10).map(d => d.t)).toEqual([1, 2, 3, 4])
   expect(lastDecisions('', 5)).toEqual([])
+})
+
+test('dw13_last_decisions_skips_invalid_fields_before_taking_last_five', () => {
+  const valid = (t: number) => ({ t, agentType: 'a', reason: 'r', route: 'codex', claudeAfter: 1, codexAfter: 2 })
+  const lines = [valid(1), {}, valid(2), { ...valid(9), route: 'other' }, valid(3), { ...valid(9), t: '9' }, valid(4), { ...valid(9), codexAfter: '2' }, valid(5), valid(6)]
+  expect(lastDecisions(lines.map(x => JSON.stringify(x)).join('\n')).map(x => x.t)).toEqual([2, 3, 4, 5, 6])
 })
 
 // ---------- status entry (PRD 10): pure formatter ----------
@@ -504,6 +510,19 @@ test('dw10_no_nudge_in_mode_off_or_claude', OPTS({ mode: 'off' }), async ($, on)
   expect(w.contexts.at(-1)).toBeUndefined()
 })
 
+test('dw10_armed_nudge_waits_until_auto_mode_returns', async ($, on) => {
+  const w = world(on, CODEX_IDLE)
+  await measure($, w, 40, 40)
+  await cmd($, 'claude')
+  await submit($)
+  expect(w.contexts.at(-1)).toBeUndefined()
+  await cmd($, 'auto')
+  await submit($)
+  expect(w.contexts.at(-1)![0]).toMatch(NUDGE)
+  await submit($)
+  expect(w.contexts.at(-1)).toBeUndefined()
+})
+
 test('dw10_routing_decisions_enter_the_state_too', async ($, on) => {
   const w = world(on, CODEX_AHEAD) // Claude 80% used, Codex 5%: gap far over 25
   await startSession($)
@@ -912,6 +931,16 @@ test('dw30a_missing_or_broken_file_means_no_grants', async ($, on) => {
   const w = world(on, CODEX_AHEAD)
   await $.tool.call(agent(GPW) as any)
   expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw30_redundant_separators_are_normalized_before_grants', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.dirs.add('/srv/data')
+  w.files.set(`${DATA}/writable-dirs.json`, JSON.stringify({ [CWD]: ['/home//t', '//home', '/srv//data'] }))
+  await $.tool.call(agent(GPW) as any)
+  const argv = w.spawns[0]!.argv
+  expect(argv.filter(x => x === '--add-dir')).toHaveLength(1)
+  expect(argv[argv.indexOf('--add-dir') + 1]).toBe('/srv/data')
 })
 
 test('dw30a_unparseable_file_means_no_grants_and_no_error', async ($, on) => {

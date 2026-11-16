@@ -38,6 +38,13 @@ test('dw26b_claude_reserved_cost_reduces_both_window_scores', () => {
   expect(d.claudeAfter).toBe(score(c, NOW, { fiveHour: 4, sevenDay: 2.2 }))
 })
 
+test('dw26_weekly_reservation_limits_score_and_routes_to_codex', () => {
+  const claude = reading(w5(0, 5), w7(80, 168))
+  const d = decide(base({ claude, claudeCost: ZERO_COST, claudeReserved: { fiveHour: 0, sevenDay: 5 } }))
+  expect(d.claudeAfter).toBe(15)
+  expect(d.route).toBe('codex')
+})
+
 test('dw1_past_resets_at_is_a_reset_window', () => {
   const past: WindowReading = { used: 99, resetsAt: NOW - 1, lengthMs: FIVE_HOUR_MS }
   expect(effectiveWindow(past, FIVE_HOUR_MS, NOW)).toEqual({ used: 0, resetsAt: null, lengthMs: FIVE_HOUR_MS })
@@ -270,6 +277,19 @@ const genInput = (r: Rng): DecideInput => ({
   inflight: Math.floor(r() * 4), codexAvailable: r() < 0.9,
 })
 const forAll = (seed: number, body: (r: Rng) => void) => { const r = mulberry32(seed); for (let i = 0; i < CASES; i++) body(r) }
+
+test('prop_dw26_claude_reservation_equals_increased_cost', () => {
+  forAll(306, r => {
+    const input = genInput(r)
+    input.mode = 'auto'
+    input.claudeReserved = genCost(r)
+    const withCost = { ...input, claudeCost: {
+      fiveHour: input.claudeCost.fiveHour + input.claudeReserved.fiveHour,
+      sevenDay: input.claudeCost.sevenDay + input.claudeReserved.sevenDay,
+    }, claudeReserved: ZERO_COST }
+    expect(decide(input)).toEqual(decide(withCost))
+  })
+})
 
 test('prop_runway_never_increases_when_used_increases', () => {
   forAll(1, r => {

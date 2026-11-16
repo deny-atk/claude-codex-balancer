@@ -87,9 +87,9 @@ export function buildCodexArgv(o: {
 /** Syntax only: absolute, no `.`/`..` segment, not `/`, not the home folder or one of its ancestors. The caller checks existence. */
 export function safeDirSyntax(path: string, home: string | undefined): boolean {
   if (!path.startsWith('/') || path.split('/').some(seg => seg === '.' || seg === '..')) return false
-  const p = path.replace(/\/+$/, '')
+  const p = path.replace(/\/+/g, '/').replace(/\/+$/, '')
   if (p === '') return false
-  const h = (home ?? '').replace(/\/+$/, '')
+  const h = (home ?? '').replace(/\/+/g, '/').replace(/\/+$/, '')
   return !(h !== '' && (h === p || h.startsWith(p + '/')))
 }
 
@@ -221,8 +221,9 @@ export async function runCodex($: $, o: {
   let stopped: 'timeout' | 'aborted' | 'spawn-error' | undefined
   let spawnMessage: string | undefined
   let ended = false
-  const it = $.process.spawn({ argv: o.argv, cwd: o.cwd, ...(o.input !== undefined ? { input: o.input } : {}) })[Symbol.asyncIterator]()
+  let it: AsyncIterator<any> | undefined
   try {
+    it = $.process.spawn({ argv: o.argv, cwd: o.cwd, ...(o.input !== undefined ? { input: o.input } : {}) })[Symbol.asyncIterator]()
     for (;;) {
       if (ac.signal.aborted) { stopped = timedOut ? 'timeout' : 'aborted'; break }
       const next = it.next()
@@ -239,7 +240,7 @@ export async function runCodex($: $, o: {
   } finally {
     // Kills the child. Awaited, so the caller releases its reservation only once the child is gone; bounded, so a stuck
     // cleanup cannot hang the hook.
-    if (!ended) await boundedCleanup(Promise.resolve(it.return?.(undefined as never)).catch(() => {}), o.cleanupMs ?? CLEANUP_MS, g)
+    if (!ended && it) await boundedCleanup(Promise.resolve(it.return?.(undefined as never)).catch(() => {}), o.cleanupMs ?? CLEANUP_MS, g)
     if (timer !== undefined) g.clearTimeout?.(timer)
     o.signal?.removeEventListener('abort', onAbort)
   }
@@ -260,7 +261,34 @@ export async function runCodex($: $, o: {
 // already modified or untracked, so the content is compared too.
 // shortcut: one `git hash-object` call over every listed path (a batch that fails is retried path by path), so a huge
 // list of untracked files makes a long argv and a slow hash; replace with --stdin-paths if that shows up.
-const unquote = (p: string) => (p.startsWith('"') && p.endsWith('"') && p.length >= 2 ? p.slice(1, -1).replace(/\\(["\\])/g, '$1') : p)
+export function unquoteGitPath(p: string): string {
+  if (!p.startsWith('"') || !p.endsWith('"') || p.length < 2) return p
+  const bytes: number[] = []
+  const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 }
+  const body = p.slice(1, -1)
+  for (let i = 0; i < body.length;) {
+    if (body[i] === '\\') {
+      const octal = body.slice(i + 1).match(/^[0-7]{3}/)?.[0]
+      if (octal) { bytes.push(parseInt(octal, 8)); i += 4; continue }
+      const escaped = escapes[body[i + 1] ?? '']
+      if (escaped !== undefined) { bytes.push(escaped); i += 2; continue }
+    }
+    const codepoint = body.codePointAt(i)!
+    bytes.push(...new TextEncoder().encode(String.fromCodePoint(codepoint)))
+    i += codepoint > 0xffff ? 2 : 1
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes))
+}
+
+function renameDestination(rest: string): string {
+  let quoted = false
+  for (let i = 0; i < rest.length; i++) {
+    if (quoted && rest[i] === '\\') { i++; continue }
+    if (rest[i] === '"') quoted = !quoted
+    if (!quoted && rest.slice(i, i + 4) === ' -> ') return rest.slice(i + 4)
+  }
+  return rest
+}
 
 export async function gitSnapshot($: $, cwd: string): Promise<string[] | null> {
   try {
@@ -268,8 +296,8 @@ export async function gitSnapshot($: $, cwd: string): Promise<string[] | null> {
     if (r.exitCode !== 0) return null
     const entries = r.stdout.split('\n').filter(l => l.length > 3).map(l => {
       const rest = l.slice(3)
-      const arrow = rest.indexOf(' -> ')
-      return { path: unquote(arrow >= 0 ? rest.slice(arrow + 4) : rest), deleted: l[0] === 'D' || l[1] === 'D' }
+      const renamed = l[0] === 'R' || l[1] === 'R' || l[0] === 'C' || l[1] === 'C'
+      return { path: unquoteGitPath(renamed ? renameDestination(rest) : rest), deleted: l[0] === 'D' || l[1] === 'D' }
     })
     const hashes = new Map<string, string>()
     const live = [...new Set(entries.filter(e => !e.deleted).map(e => e.path))]
@@ -291,7 +319,7 @@ export async function gitSnapshot($: $, cwd: string): Promise<string[] | null> {
 /** Paths whose line is new or changed, or that dropped out of the status (a file restored or deleted). */
 export function changedSince(before: string[] | null, after: string[] | null): string[] | null {
   if (!before || !after) return null
-  const split = (l: string) => { const i = l.indexOf('\t'); return [i < 0 ? l : l.slice(0, i), l] as const }
+  const split = (l: string) => { const i = l.lastIndexOf('\t'); return [i < 0 ? l : l.slice(0, i), l] as const }
   const was = new Map(before.map(split))
   const now = new Map(after.map(split))
   return [

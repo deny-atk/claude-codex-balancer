@@ -424,7 +424,17 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
 
   // The 2.1.321 input type omits run_in_background; the model may still send it.
   if ((e as { run_in_background?: boolean }).run_in_background === false) {
-    const s = await runTask($, st, task, next.signal, `${dd}/runs/${agentId}.txt`)
+    const ac = new AbortController()
+    const abort = () => ac.abort()
+    if (next.signal.aborted) abort()
+    else next.signal.addEventListener('abort', abort, { once: true })
+    const done = runTask($, st, task, ac.signal, `${dd}/runs/${agentId}.txt`)
+    st.runs.set(agentId, { ac, sessionId, description: e.description, done: done.then(() => {}, () => {}) })
+    let s: Settled
+    try { s = await done } finally {
+      st.runs.delete(agentId)
+      next.signal.removeEventListener('abort', abort)
+    }
     if (s.kind === 'ok') {
       return { result: completedRecord({ agentId, text: s.report, prompt: e.prompt, durationMs: s.durationMs, agentType: type }) }
     }
@@ -474,11 +484,18 @@ async function writableRoots($: EngineInterface, st: State, cwd: string): Promis
   const root = await $.session.root()
   const dirs: string[] = []
   if (roots) {
-    if (roots.toplevel !== cwd && (await usable(roots.toplevel))) dirs.push(roots.toplevel)
-  } else if (cwd.startsWith(root.replace(/\/+$/, '') + '/') && (await usable(root))) dirs.push(root)
+    const top = roots.toplevel.replace(/\/+/g, '/')
+    if (top !== cwd.replace(/\/+/g, '/') && (await usable(top))) dirs.push(top)
+  } else {
+    const normalizedRoot = root.replace(/\/+/g, '/')
+    if (cwd.replace(/\/+/g, '/').startsWith(normalizedRoot.replace(/\/+$/, '') + '/') && (await usable(normalizedRoot))) dirs.push(normalizedRoot)
+  }
   let grants: string[] = []
   try { grants = grantsFor(await $.fs.read(`${await dataDir($, st)}/writable-dirs.json`), roots ? projectKey(roots.commonDir) : root) } catch { /* no file */ }
-  for (const d of grants) if (await usable(d)) dirs.push(d)
+  for (const grant of grants) {
+    const d = grant.replace(/\/+/g, '/')
+    if (await usable(d)) dirs.push(d)
+  }
   return { gitCwd: roots?.toplevel ?? cwd, addDirs: [...new Set(dirs)] }
 }
 
@@ -513,24 +530,26 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   const now = await $.clock.now()
   let after: ProviderReading | null = null
   if (run.threadId) {
-    after = await readCodexRollout($, now, run.threadId)
+    try { after = await readCodexRollout($, now, run.threadId) } catch { /* best effort */ }
     if (after) {
-      await saveReading($, 'codex', after)
-      st.cache.put('codex', after, now)
+      await quietly(() => saveReading($, 'codex', after!))
+      await quietly(() => st.cache.put('codex', after!, now))
       if (run.outcome !== 'aborted') {
-        const others = (await listInflight($, now, st.opts.taskTimeoutMs)).length > 0
-        await saveEstimate($, c.type, updateEstimate(c.estimate, c.codexBefore, after, overlapped || others))
+        await quietly(async () => {
+          const others = (await listInflight($, now, st.opts.taskTimeoutMs)).length > 0
+          await saveEstimate($, c.type, updateEstimate(c.estimate, c.codexBefore, after!, overlapped || others))
+        })
       }
     }
   }
   if (run.limitHit) {
     const limit: ProviderReading = { ...(after ?? c.codexBefore ?? emptyReading(now)), readAt: now, limitReached: true }
-    await saveReading($, 'codex', limit)
-    st.cache.put('codex', limit, now)
+    await quietly(() => saveReading($, 'codex', limit))
+    await quietly(() => st.cache.put('codex', limit, now))
   }
   if (run.outcome === 'spawn-error') {
     st.broken = true
-    await toastOnce($, st)
+    await quietly(() => toastOnce($, st))
   }
 
   c.entry.durationMs = run.durationMs
@@ -538,13 +557,13 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   if (run.exitCode !== null) c.entry.exitCode = run.exitCode
   const delta = deltaOf(c.codexBefore, after)
   if (delta) c.entry.delta = delta
-  await writeLog($, st, c.entry)
+  await quietly(() => writeLog($, st, c.entry))
 
-  await setRun($, c.rowId, run.outcome === 'aborted' ? null : {
+  await quietly(() => setRun($, c.rowId, run.outcome === 'aborted' ? null : {
     model: c.model ?? 'default', effort: c.effort, running: false, durationMs: run.durationMs, ...(delta ? { delta5h: delta.fiveHour } : {}),
     ...(run.outcome === 'ok' && run.finalMessage !== undefined ? {} : { failed: true }),
-  })
-  await observe($, st)
+  }))
+  await quietly(() => observe($, st))
 
   if (run.outcome === 'aborted') return { kind: 'aborted' }
   const afterGit = git ? await gitSnapshot($, roots.gitCwd) : null
@@ -758,7 +777,7 @@ export async function onBalance($: EngineInterface, st: State, args: string): Pr
 
 /** Attaches the armed reminder to a typed prompt, once. Not to a slash command or a prompt the person did not type. */
 export function onPromptSubmit(st: State, e: PromptSubmitInput, next: Next<'prompt.submit'>) {
-  if (!st.tight || !st.armed || e.command || e.isMeta) return next(e)
+  if (modeNow(st) === 'off' || modeNow(st) === 'claude' || !st.tight || !st.armed || e.command || e.isMeta) return next(e)
   st.armed = false
   return next({ ...e, context: [...(e.context ?? []), NUDGE_TEXT] })
 }
