@@ -58,7 +58,9 @@ in-flight Codex runs, so installs are rare and deliberate:
   claude plugin update balancer@<marketplace>
   ```
 
-  An update to the same version changes nothing and reloads nothing.
+  An update to the same version changes nothing and reloads nothing. A version
+  already in the plugin cache is reused as it stands, so every merge that
+  changes the plugin bumps its version.
 
 Branch builds are tested with `claude plugin test` and, live, only in
 headless sessions:
