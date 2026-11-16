@@ -133,6 +133,7 @@ A fresh module checks the leftover records once. For each record of its own sess
 
 - it releases the Codex reservation;
 - it logs the decision entry with outcome `lost`;
+- it stops a Codex child that outlived its Claude Code process (`pkill -f` on `codex exec` with the run's agent id, then a 1 second wait), since a killed process, unlike a reload, leaves the child running;
 - it compares the git folder with the before-snapshot;
 - it tells the caller once that the run ended without a result, whether files changed (none, the list with the saved patch, or unknown), and adds any final message Codex had already written.
 
@@ -150,7 +151,7 @@ Records of other sessions are left alone, since their runs may be alive. Once ol
 
 Limits:
 
-- A Codex run does not survive a reload, and nothing is resumed.
+- Nothing is resumed: a reload kills the Codex child, and the check stops one that a killed process left behind. Commands Codex had started may outlive it.
 - A reload also resets the session's `/balance` mode and drops Claude reservations held in memory, which then age out after `taskTimeoutMinutes`.
 - A record that cannot be stored (the store is full) leaves that run unguarded.
 - What a foreground call returns when its module is unloaded mid-run is up to the engine.

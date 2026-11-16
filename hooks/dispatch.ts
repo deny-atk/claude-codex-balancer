@@ -172,6 +172,12 @@ async function lostRun($: EngineInterface, st: State, record: RunRecord, current
   st.reconciling.add(record.agentId)
   await quietly(() => removeInflight($, record.agentId))
   await quietly(() => writeLog($, st, { ...record.entry, outcome: 'lost' }))
+  // A reload kills the Codex child, but a killed Claude Code process leaves it running (seen live): stop it before the
+  // change check. The pattern matches only a codex exec whose -o file carries this agent id.
+  await quietly(async () => {
+    const r = await $.process.run(['pkill', '-f', `codex exec .*${record.agentId}`])
+    if (r.exitCode === 0) await $.clock.sleep(1000)
+  })
   if (!current) return { agentId: record.agentId }
   let changed: string[] | null = []
   let notes = ''

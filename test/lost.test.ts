@@ -172,3 +172,16 @@ test('dw44_task_stop_on_another_id_goes_to_the_engine', async ($, on) => {
   await $.tool.call({ tool: 'TaskStop', task_id: 'b12345' } as any)
   expect(w.stopCalls).toHaveLength(1)
 })
+
+test('dw42_a_codex_child_that_outlived_its_process_is_stopped_before_the_change_check', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record() }, { pkillFinds: true } as any)
+  const started = startSession($)
+  await settleReal(() => w.processCalls.some((c: string[]) => c[0] === 'pkill'))
+  await w.clock.advance(1000) // the wait for the stopped child to exit
+  await started
+  const kill = w.processCalls.findIndex((c: string[]) => c[0] === 'pkill')
+  const status = w.processCalls.findIndex((c: string[]) => c[0] === 'git' && c[1] === 'status')
+  expect(w.processCalls[kill]).toEqual(['pkill', '-f', 'codex exec .*codex-123'])
+  expect(kill).toBeLessThan(status)
+  expect(lostSubmits(w)).toHaveLength(1)
+})

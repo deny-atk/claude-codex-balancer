@@ -69,6 +69,7 @@ export type World = {
   failStoreWrites: boolean
   statuses: (string | undefined)[] // every $.ui.status call, in order
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
+  pkillFinds?: boolean // `pkill` reports that it signalled a process
   submitGate?: Promise<void> // a prompt.submit reaching the bottom waits for this: the prompt has not entered yet
   state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
   modelCalls: string[] // model.complete / classify / fork that reached the bottom: the mod must make none
@@ -177,6 +178,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
       const out = w.git.length > 1 ? w.git.shift()! : w.git[0]!
       return { value: { exitCode: out === null ? 128 : 0, stdout: out ?? '', stderr: '' } }
     }
+    if (a === 'pkill') return { value: { exitCode: w.pkillFinds ? 0 : 1, stdout: '', stderr: '' } }
     if (a === 'tail') return { value: { exitCode: w.rollout === null ? 1 : 0, stdout: w.rollout ?? '', stderr: '' } }
     if (a === 'sh') return { value: { exitCode: 1, stdout: '', stderr: '' } } // app server: no answer
     throw new Error('unexpected process.run ' + String(a))
