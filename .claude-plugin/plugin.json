@@ -1,6 +1,6 @@
 {
   "name": "balancer",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "description": "Shares delegated subagent work between Claude and the local Codex CLI so both subscriptions are used at a similar pace.",
   "author": {
     "name": "Balancer"
@@ -42,6 +42,12 @@
       "title": "Eligible agent types",
       "description": "Comma-separated subagent types that may run on Codex",
       "default": "general-purpose,claude,Explore"
+    },
+    "excludedAgentTypes": {
+      "type": "string",
+      "title": "Excluded agent types",
+      "description": "Comma-separated subagent types that always stay on Claude, even in codex mode",
+      "default": "plan-reviewer"
     },
     "effortMap": {
       "type": "string",

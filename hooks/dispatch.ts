@@ -48,6 +48,7 @@ export function readOptions(o: PluginOptions) {
       maxConcurrentCodex: num(o, 'maxConcurrentCodex', 2),
     } as PolicyConfig,
     eligible: new Set(str(o, 'eligibleAgentTypes', 'general-purpose,claude,Explore').split(',').map(s => s.trim()).filter(Boolean)),
+    excluded: new Set(str(o, 'excludedAgentTypes', 'plan-reviewer').split(',').map(s => s.trim()).filter(Boolean)),
     effortMap: parseEffortMap(str(o, 'effortMap', 'haiku=low,sonnet=medium,opus=high,default=high')),
     modelMap: parseEffortMap(str(o, 'modelMap', 'opus=gpt-6.1-sol,sonnet=gpt-6.1-terra')),
     codexModel: str(o, 'codexModel', ''),
@@ -82,6 +83,7 @@ type Task = {
   agentId: string; sessionId: string; type: string; description: string; prompt: string
   rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
   cwd: string; sandbox: Sandbox; model?: string; effort: string; outFile: string
+  callModel?: string // the Agent call's own `model` argument, for a Claude redo; `model` is the Codex one
   agent?: { type: string; body: string } // a custom type's instructions, carried to Codex
   base: string // `<data>/runs/<agentId>`: the patch and partial notes go beside the other run files
   estimate: Cost; codexBefore: ProviderReading | null
@@ -101,7 +103,8 @@ const failureText = (s: { reason: string; changed: string[] | null; sandbox: San
   buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox, ...s.saved })
 
 const reasonOf = (r: CodexRun): string =>
-  r.outcome === 'spawn-error' ? 'codex missing'
+  r.outcome === 'blocked' ? 'blocked'
+  : r.outcome === 'spawn-error' ? 'codex missing'
   : r.limitHit ? 'limit reached'
   : r.outcome === 'timeout' ? 'timeout'
   : r.exitCode !== null && r.exitCode !== 0 ? `exit ${r.exitCode}`
@@ -366,9 +369,10 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
       reserved, claudeReserved, inflight: list.length, codexAvailable: usable,
     }
     let d: Decision
-    if (mode === 'auto' && now < st.cooldownUntil) {
+    const excluded = mode !== 'claude' && st.opts.excluded.has(type)
+    if (excluded || (mode === 'auto' && now < st.cooldownUntil)) {
       d = {
-        route: 'claude', reason: 'codex-cooldown', refresh: false,
+        route: 'claude', reason: excluded ? 'agent-excluded' : 'codex-cooldown', refresh: false,
         claudeAfter: score(claude, now, { fiveHour: st.opts.claudeCost.fiveHour + claudeReserved.fiveHour, sevenDay: st.opts.claudeCost.sevenDay + claudeReserved.sevenDay }),
         codexAfter: score(codex, now, { fiveHour: reserved.fiveHour + estimate.fiveHour, sevenDay: reserved.sevenDay + estimate.sevenDay }),
       }
@@ -381,8 +385,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     const agentId = newAgentId()
     if (d.route === 'codex') await reserve($, { id: agentId, sessionId, startedAt: now, cost: estimate, agentType: type }, list)
     else {
-      await addInflight($, { id: agentId, sessionId, startedAt: now, cost: st.opts.claudeCost, agentType: type }, CLAUDE_INFLIGHT)
-      st.claudeReservations.set(agentId, sessionId)
+      await reserveClaude($, st, agentId, sessionId, type, now)
     }
     return { d, entry, agentId, codex, estimate }
   })
@@ -391,20 +394,10 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   st.lastRoute = picked.d.route
   if (picked.d.refresh) void refreshCodex($, st)
   if (picked.d.route === 'claude') {
-    let background = false
-    try {
+    return nextOnClaude($, st, picked.agentId, e, next, async () => {
       await writeLog($, st, picked.entry)
       await observe($, st)
-      const result = await next(e)
-      const value = 'result' in result ? result.result : undefined
-      if (st.claudeReservations.has(picked.agentId) && value && typeof value === 'object' && 'status' in value && value.status === 'async_launched' && 'agentId' in value && typeof value.agentId === 'string') {
-        st.claudeAgents.set(value.agentId, picked.agentId)
-        background = true
-      }
-      return result
-    } finally {
-      if (!background) await quietly(() => releaseClaude($, st, picked.agentId)) // a store error must not replace the call's result
-    }
+    })
   }
 
   const agentId = picked.agentId
@@ -415,6 +408,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     cwd, sandbox, effort: (def && codexEffort(def)) ?? effortFor(model, st.opts.effortMap),
     outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`,
     model: codexModelFor(model, st.opts.modelMap, st.opts.codexModel),
+    ...(e.model !== undefined ? { callModel: e.model } : {}),
     ...(def ? { agent: { type, body: def.body } } : {}),
     estimate: picked.estimate, codexBefore: picked.codex, entry: picked.entry,
   }
@@ -432,8 +426,12 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     if (s.kind === 'aborted') return { deny: 'Balancer: the Codex run was interrupted' }
     if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
       await fellBack($, st, task, s.reason)
-      // What Codex got done is handed on as unverified notes; with none, the call goes through untouched.
-      return next(s.saved.partial ? { ...e, prompt: `${e.prompt}\n\n${partialBlock(s.reason, s.saved.partial.text)}` } : e)
+      if (s.reason === 'blocked') await logRedo($, st, task)
+      // The call goes through untouched: in auto mode the classifier refuses an input a hook changed after its review,
+      // and the model's own retry would land on Codex again. Codex's notes stay in the run's .partial.txt file.
+      const reservation = newAgentId()
+      try { await reserveClaude($, st, reservation, sessionId, type, await $.clock.now()) } catch { return next(e) } // the call still goes through
+      return nextOnClaude($, st, reservation, e, next)
     }
     return { result: completedRecord({ agentId, text: failureText(s), prompt: e.prompt, durationMs: 0, agentType: type }) }
   }
@@ -597,6 +595,16 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
   if (s.kind === 'ok') {
     await $.fs.write(outputFile, s.report)
     text = `[balancer] Background agent "${c.description}" (${c.agentId}) finished on Codex.\n\n${s.report}`
+  } else if (s.reason === 'blocked' && (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0))) {
+    // Nothing was changed, so the task is redone once on Claude: no cooldown, since Codex itself worked.
+    const notes = s.saved.partial ? partialBlock('blocked', s.saved.partial.text) : undefined
+    const r = await startRedo($, st, c, notes)
+    // The engine delivers the redo's own report as its notification; this message only links it to the Codex id the model holds.
+    text = 'agentId' in r
+      ? `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed. ` +
+        `Balancer is redoing it once on Claude as background agent ${r.agentId}; its report will come from that agent.`
+      : `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed, and the Claude redo could not start (${r.failed}). Delegate it again.` +
+        (notes ? `\n\n${notes}` : '')
   } else if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
     st.cooldownUntil = (await $.clock.now()) + COOLDOWN_MS
     await fellBack($, st, c, s.reason, true)
@@ -608,6 +616,37 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
       failureText(s)
   }
   await $.prompt.submit({ text })
+}
+
+// The decision log's line for a redo: the Codex entry's numbers, now routed to Claude.
+async function logRedo($: EngineInterface, st: State, c: Task): Promise<void> {
+  const { session, agentType, claudeAfter, codexAfter, estimate, mode } = c.entry
+  const entry: DecisionEntry = { t: await $.clock.now(), session, agentType, route: 'claude', reason: 'codex-blocked', claudeAfter, codexAfter, estimate, mode }
+  pushRecent(st.recent, entry)
+  await writeLog($, st, entry)
+}
+
+/** Spawns the one Claude redo of a blocked background run: its agent id, or why it could not start. */
+async function startRedo($: EngineInterface, st: State, c: Task, notes: string | undefined): Promise<{ agentId: string } | { failed: string }> {
+  const reservation = newAgentId()
+  let agentId: string
+  try {
+    await reserveClaude($, st, reservation, c.sessionId, c.type, await $.clock.now())
+    const r = await $.agent.spawn({
+      prompt: notes ? `${c.prompt}\n\n${notes}` : c.prompt, description: c.description, subagentType: c.type,
+      ...(c.callModel !== undefined ? { model: c.callModel } : {}),
+    })
+    const deny = (r as { deny?: string }).deny
+    if (deny !== undefined || !r.agentId) throw new Error(deny ?? 'no agent id')
+    st.claudeAgents.set(r.agentId, reservation)
+    agentId = r.agentId
+  } catch (err) {
+    await quietly(() => releaseClaude($, st, reservation))
+    return { failed: String((err as { message?: unknown })?.message ?? err).slice(0, 200) }
+  }
+  await logRedo($, st, c)
+  await quietly(() => $.ui.toast('Balancer: Codex reported blocked, redoing the task on Claude.'))
+  return { agentId }
 }
 
 // A failure that put the task back on Claude: the row loses its Codex line, and the person is told (once, spawn errors already were).
@@ -636,6 +675,30 @@ export async function onSessionEnd($: EngineInterface, st: State, e: { sessionId
   await Promise.allSettled(mine.map(r => r.done))
   for (const [id, sessionId] of st.claudeReservations) {
     if (sessionId === e.sessionId) await releaseClaude($, st, id)
+  }
+}
+
+async function reserveClaude($: EngineInterface, st: State, id: string, sessionId: string, type: string, startedAt: number): Promise<void> {
+  await addInflight($, { id, sessionId, startedAt, cost: st.opts.claudeCost, agentType: type }, CLAUDE_INFLIGHT)
+  st.claudeReservations.set(id, sessionId)
+}
+
+/** `next(e)` under a Claude reservation: released when the call ends, or, for a background launch, at the agent's turn.complete. */
+async function nextOnClaude(
+  $: EngineInterface, st: State, reservation: string, e: AgentCall, next: Next<'tool.call', AgentCall>, before?: () => Promise<void>,
+) {
+  let background = false
+  try {
+    await before?.()
+    const result = await next(e)
+    const value = 'result' in result ? result.result : undefined
+    if (st.claudeReservations.has(reservation) && value && typeof value === 'object' && 'status' in value && value.status === 'async_launched' && 'agentId' in value && typeof value.agentId === 'string') {
+      st.claudeAgents.set(value.agentId, reservation)
+      background = true
+    }
+    return result
+  } finally {
+    if (!background) await quietly(() => releaseClaude($, st, reservation)) // a store error must not replace the call's result
   }
 }
 

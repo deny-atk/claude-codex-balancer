@@ -27,6 +27,10 @@ export type World = {
   toasts: string[]
   submits: string[]
   agentCalls: any[]
+  agentSpawns: any[] // every agent.spawn input that reached the bottom
+  agentSpawnDeny?: string // when set, agent.spawn answers { deny }
+  agentSpawnThrow?: string // when set, agent.spawn throws this message
+  claudeDuring?: () => void // runs when the stubbed Claude Agent call starts
   claudeResult: any
   runEntries?: any[]
   processCalls: string[][]
@@ -99,7 +103,7 @@ export const rolloutFor = (fiveUsed: number) =>
 
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
-    store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
+    store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], agentSpawns: [], stopCalls: [],
     claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(),
     gate: undefined as any, openGate: () => {},
     git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
@@ -204,7 +208,13 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('prompt.compose', () => { w.compose++; return { sections: SECTIONS } })
   on('prompt.submit', (_$: any, e: any) => { w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
   on('session.compact', (_$: any, e: any) => ({ messages: e.messages }))
-  on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); if (w.claudeResult instanceof Error) throw w.claudeResult; return { result: w.claudeResult } })
+  on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); w.claudeDuring?.(); if (w.claudeResult instanceof Error) throw w.claudeResult; return { result: w.claudeResult } })
+  // The kit cannot mint a spawned agent's id (core sets it), so a success is driven in test/blocked.test.ts; this answers deny and throw.
+  on('agent.spawn', (_$: any, e: any) => {
+    w.agentSpawns.push(e)
+    if (w.agentSpawnThrow !== undefined) throw new Error(w.agentSpawnThrow)
+    return w.agentSpawnDeny !== undefined ? { deny: w.agentSpawnDeny } : { model: 'sonnet', agentId: 'redo-1' }
+  })
   on('turn.complete', (_$: any, e: any) => ({ text: e.text }))
   on('tool.call', { tool: 'TaskStop' }, (_$: any, e: any) => { w.stopCalls.push(e); return { result: { message: 'claude-stop', task_id: e.task_id, task_type: 'x' } } })
   on('session.start', async (_$: any, e: any) => ({ cwd: e.cwd }))

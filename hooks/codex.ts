@@ -8,7 +8,18 @@ export const PREAMBLE = [
   "You are running as a delegated subtask of another agent's session. Do only what the brief below asks.",
   'Do not commit, push or switch branches unless the brief says so.',
   'End with a report of what you did, what you verified and what you did not verify.',
+  'If you could not do the task, for example because the sandbox refused a write you needed, make the first line of your final message `BLOCKED: <one-line reason>`, then say what you did and did not do.',
 ].join(' ')
+
+/**
+ * True when a final message says the run could not do the task: a `BLOCKED:` first line, or a `Status: blocked` line
+ * among the first five. Markdown emphasis and heading marks are ignored. Prose that merely mentions "blocked" is not.
+ */
+export function isBlocked(finalMessage: string): boolean {
+  const head = finalMessage.split('\n').filter(l => l.trim() !== '').slice(0, 5)
+    .map(l => l.replace(/[*_`]/g, '').replace(/^[#>\-\s]+/, ''))
+  return /^blocked\s*:/i.test(head[0] ?? '') || head.some(l => /^status\s*[:—–-]\s*blocked\b/i.test(l))
+}
 
 export const PROMPT_ARG_LIMIT_BYTES = 100 * 1024
 
@@ -148,7 +159,7 @@ export function createEventParser() {
 // ---------- run ----------
 
 export type CodexRun = {
-  outcome: 'ok' | 'failed' | 'timeout' | 'aborted' | 'spawn-error'
+  outcome: 'ok' | 'blocked' | 'failed' | 'timeout' | 'aborted' | 'spawn-error'
   exitCode: number | null
   threadId?: string
   finalMessage?: string
@@ -224,7 +235,8 @@ export async function runCodex($: $, o: {
   }
   parser.flush()
   const s = parser.state
-  const outcome: CodexRun['outcome'] = stopped ?? (exitCode === 0 && s.finalMessage ? 'ok' : 'failed')
+  const outcome: CodexRun['outcome'] = stopped ??
+    (exitCode === 0 && s.finalMessage ? (isBlocked(s.finalMessage) ? 'blocked' : 'ok') : 'failed')
   return {
     outcome, exitCode, threadId: s.threadId, finalMessage: s.finalMessage, usage: s.usage,
     failureMessage: s.failureMessage ?? spawnMessage, limitHit: s.limitHit,

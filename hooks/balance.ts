@@ -112,7 +112,7 @@ export function formatBalance(i: {
   if (i.recent.length === 0) out.push('Last decisions: none yet')
   else {
     out.push('Last decisions:')
-    for (const d of i.recent) out.push(`  ${clock(d.t)} ${d.agentType} -> ${d.route} (${d.reason})`)
+    for (const d of i.recent) out.push(`  ${clock(d.t)} ${d.agentType} -> ${d.route} (${d.reason})${d.outcome && d.outcome !== 'ok' ? `, ${d.outcome}` : ''}`)
   }
   return out.join('\n')
 }

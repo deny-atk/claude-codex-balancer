@@ -914,24 +914,21 @@ test('dw5_background_limit_hit_with_edits_delivers_patch_untracked_partial_and_r
   for (const part of [`${id}.patch`, 'new.py', PARTIAL, `${id}.partial.txt`, RESUME]) expect(w.submits[0]).toContain(part)
 })
 
-test('dw5_read_only_limit_hit_with_partial_notes_carries_them_into_the_claude_prompt', async ($, on) => {
+// Changed in 0.2.6 (dw38): a rewritten prompt is refused by the auto-mode classifier, so the foreground fallback no longer carries notes.
+test('dw38_read_only_limit_hit_with_partial_notes_leaves_the_claude_call_untouched', async ($, on) => {
   const w = LIMIT_WORLD(on)
   const input = agent() // Explore: read-only, falls back to Claude
   const r: any = await $.tool.call(input as any)
   expect(r.result).toEqual(CLAUDE_MARK)
-  const got = w.agentCalls[0]
-  expect(got).toEqual({ ...input, prompt: got.prompt, tool_use_id: got.tool_use_id })
-  expect(got.prompt).toStartWith(input.prompt + '\n\n')
-  expect(got.prompt).toContain('limit reached')
-  expect(got.prompt).toContain(PARTIAL)
-  expect(got.prompt).toMatch(/verify/i)
+  same(w.agentCalls[0], input)
 })
 
-test('dw5_sync_failure_with_no_changes_and_partial_notes_carries_them_too', async ($, on) => {
+test('dw38_sync_failure_with_no_changes_keeps_the_notes_on_disk_only', async ($, on) => {
   const w = LIMIT_WORLD(on, { git: ['', ''] })
-  await $.tool.call(agent(GP) as any)
-  expect(w.agentCalls[0].prompt).toContain(PARTIAL)
-  expect(w.files.size).toBeGreaterThan(0)
+  const input = agent(GP)
+  await $.tool.call(input as any)
+  same(w.agentCalls[0], input)
+  expect([...w.files.keys()].some(k => k.endsWith('.partial.txt'))).toBe(true)
   expect([...w.files.keys()].some(k => k.endsWith('.patch'))).toBe(false)
 })
 
@@ -944,10 +941,10 @@ test('dw5_a_fallback_without_partial_notes_leaves_the_input_untouched', async ($
 
 test('dw5_partial_notes_are_cut_at_4000_characters', async ($, on) => {
   const w = LIMIT_WORLD(on, { partial: 'p'.repeat(6000) })
-  await $.tool.call(agent() as any)
-  const prompt: string = w.agentCalls[0].prompt
-  expect(prompt).toContain('p'.repeat(4000))
-  expect(prompt).not.toContain('p'.repeat(4001))
+  await $.tool.call(agent({ run_in_background: undefined }) as any)
+  await settleReal(() => w.submits.length > 0)
+  expect(w.submits[0]).toContain('p'.repeat(4000))
+  expect(w.submits[0]).not.toContain('p'.repeat(4001))
 })
 
 test('dw5_background_read_only_limit_hit_puts_the_partial_notes_in_the_cooldown_message', async ($, on) => {

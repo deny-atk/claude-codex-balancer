@@ -16,6 +16,8 @@ An Agent call can run on Codex only if all of these hold. Otherwise it reaches C
 - The project has not opted out (see Configuration).
 - The session's working directory exists on this machine.
 
+A type in `excludedAgentTypes` (default `plan-reviewer`) stays on Claude even when it would otherwise be eligible. The call is logged with reason `agent-excluded`, in `auto` and in forced `codex` mode alike (in `claude` mode the reason stays `mode-claude`, in `off` nothing is logged). Why: a plan review runs on a Claude model that was set for it, and a Codex run has no advisor. The match is on the type name only, so a plan review started as a `general-purpose` call is not caught. A call that was never eligible (no agent file, say) is not logged, as before.
+
 Custom types: a `subagent_type` that is not in `eligibleAgentTypes` and has no `:` in it is looked up as a file name only: first `.claude/agents/<type>.md` under the session's project root (where it started, and where Claude Code loaded its agents), then under the working directory, which a shell `cd` into a git worktree can move away from the root, then `<config dir>/agents/<type>.md`, where the config dir is `CLAUDE_CONFIG_DIR` or else `$HOME/.claude`. The project file wins, and the first file found decides: a project file that cannot be read as a definition does not fall through to the user file. The file must start with a `---` line and have a closing `---` line (Markdown with YAML frontmatter; Balancer reads only `key: value` lines, and `tools` as a comma-separated string, `[A, B]` or `- A` lines). Everything after the frontmatter is the agent's instructions. The call stays on Claude, unchanged, when no file is found, the type has a `:` (a plugin agent), the file has no frontmatter, or its `tools` list names anything matching `mcp__`, `Skill`, `SendMessage`, `AskUserQuestion` or `Artifact`, which Codex cannot provide. The other rules above apply as for any call. The decision log's `agentType` is the custom type. Agents in subfolders or parent folders, and the frontmatter `name` field, are not looked at.
 
 In mode `off` the hook passes every call through at once and reads and logs nothing.
@@ -80,6 +82,8 @@ Everything fails safe toward Claude. Before answering a call, Balancer checks th
 | Codex cannot be started | Codex is unusable for the rest of the session, one toast, Claude runs the task. | Same toast and unusable state. A message says Codex could not run the task, nothing changed, re-delegating runs on Claude. 15-minute cooldown. |
 | Run fails or times out, `read-only` sandbox | Claude runs the task. Toast with the reason. | Message as above, 15-minute cooldown, toast. |
 | Run fails or times out, `workspace-write`, no files changed | Claude runs the task. Toast. | Message as above, cooldown, toast. |
+| Run ends saying it is blocked (below), `read-only` sandbox or no files changed | Claude runs the task, the call unchanged, under a Claude reservation like any fallback. | One Claude redo is spawned in the background, no cooldown (below). |
+| Run ends saying it is blocked, files changed | Same text as the next row, reason `blocked`. No redo. | Delivered as a message. No redo, no cooldown. |
 | Run fails or times out, `workspace-write`, files changed | Result says Codex stopped part-way, lists the changed files, saves a patch and partial notes (see below) and says not to re-run from the top. Claude does not re-run it. | The same text is delivered as a message. No cooldown. |
 | Run fails, `workspace-write`, git cannot say what changed (not a repository) | Result says Codex could not run and the check was impossible. No re-run. | Delivered as a message. No cooldown. |
 | Codex reports a usage limit | Codex is marked limited until the earliest known reset, then as the rows above. | Same. |
@@ -91,13 +95,28 @@ Work is saved when a run stops part-way (any failure, a usage limit included; no
 - Patch: if files changed, `git diff HEAD -- <changed tracked paths>` is written to `runs/<agentId>.patch`. The failure text names the patch and lists the changed untracked files separately, since a diff does not hold them (they stay on disk). A failed write changes nothing else.
 - Partial report: Codex's last message, if it sent one, is written to `runs/<agentId>.partial.txt` and appears in the failure text, cut at 4000 characters, with the path.
 - Resume hint: when the run has a session id and hit a usage limit or timed out, the text ends with the session id and `codex exec resume <id>`, to continue after the limit resets. Balancer does not run it.
-- Carry-over: when a failed run falls back to Claude (sync read-only, or no files changed) and there is a partial message, the Agent call goes on with `\n\n` and a labelled block added to its prompt: a previous Codex attempt stopped (reason), here are its notes, verify them. With no partial message the call passes through untouched. In background mode the same block is in the cooldown message, so the re-delegation can include it.
+- Carry-over: when a foreground run falls back to Claude (read-only, or no files changed), the Agent call goes on unchanged. Claude Code's auto-mode classifier refuses an input that a hook changed after its review, and the model's own retry of the refused call would be routed again, possibly to Codex; so Codex's notes stay in `runs/<agentId>.partial.txt` and are not added to the prompt. In background mode the notes are in the message as a labelled block (a previous Codex attempt stopped (reason), here are its notes, verify them), so the re-delegation, or the blocked redo, can include them.
 
 The decision log holds none of this text.
 
 Say Codex hits its limit after editing `a.py` (tracked) and creating `new.py`, having told us "parser done, tests next". The text names `runs/<id>.patch` (the `a.py` diff), says `new.py` is untracked, quotes "parser done, tests next" and ends with the `codex exec resume` command. If the task had been read-only, Claude would instead get the original brief followed by that note.
 
 "Files changed" is decided by content, not by status codes. Before and after a `workspace-write` run Balancer takes `git status --porcelain --untracked-files=all` and one `git hash-object` over the listed paths (a deleted path counts as `missing`). A path is reported when it is new in the list, has a different hash, or has dropped out of the list. Say `a.py` was already modified and `notes.txt` was untracked before the run, and Codex edits both again without changing their status codes: both hashes differ, so both are named and Claude does not re-run the task. A file that was modified before the run and restored by Codex is named too. Outside a git repository the check is impossible (the row above).
+
+### Blocked runs
+
+Sometimes Codex ends its turn without doing the work and says so, for example because the sandbox refused a write. Exit code 0 plus a final message used to count as success. Balancer's preamble now asks Codex to make the first line of its final message `BLOCKED: <one-line reason>` when it could not do the task. A run is `blocked` when it exits 0 and the message passes this test: ignore `*`, `_` and backticks, strip leading `#`, `>`, `-` and spaces, then the first non-empty line starts with `blocked:` (any case), or one of the first five non-empty lines starts with `status`, a `:`, dash or em dash, and `blocked`.
+
+Example: a message whose first line is `BLOCKED: sandbox refused the write to the lock file`, or whose second line is `**Status:** blocked`, is blocked. Counter-example: `Status: completed; one test was blocked by a flaky fixture`, or a report whose third line says "the request was blocked by a proxy", is not.
+
+A blocked run is logged with `outcome: blocked` and handled like a failure that changed nothing, except that it is redone once on Claude and never retried:
+
+- Foreground, no files changed (or `read-only`): the Agent call goes on to Claude unchanged (see Carry-over above for why the notes are not added). The call holds a Claude reservation for as long as it runs, as every fallback does; the Codex reservation is already gone, and the cost estimate is saved as for any finished run. A redo line (`codex-blocked`) is logged before the call goes on.
+- Background, no files changed (or `read-only`): Balancer spawns one Claude subagent with `$.agent.spawn`: the original prompt, a blank line and the notes block, the original description and type, and the Agent call's own `model` if it had one. It takes a Claude reservation, logs the redo line and toasts `Balancer: Codex reported blocked, redoing the task on Claude.` There is no cooldown, since Codex itself worked. It then submits one message naming the Codex run's id and the redo's agent id, since the model holds only the first. The redo's report reaches the main loop as the engine's own notification for that agent; Balancer adds nothing when it ends, and releases its reservation at its `turn.complete`. The spawned redo does not pass through Balancer's Agent hook, so it is not routed again. If the spawn is refused or throws, the reservation is released and a message says the redo could not start and to delegate again, with the notes. A redo's own failure is reported as it is, not routed anywhere.
+- Files changed: the usual failure text that lists the files, reason `blocked`. No redo.
+- `/codex`: the failure text with reason `blocked` and Codex's notes. Nothing is redone, since no Claude task waits.
+
+Sandbox denials are not counted. The `codex exec --json` stream has no event for a denied shell command, and Balancer reads nothing from Codex's rollout records beyond the `rate_limits` object, so the only signal is what Codex says in its own final message. A run that stops without saying it was blocked (say, tests never started but the report says completed) is still logged `ok`.
 
 A failure means a non-zero exit, no final message, or a timeout (`taskTimeoutMinutes`). A background failure cannot fall back to Claude in the same call, because the call was already answered; that is why the message and cooldown exist.
 
@@ -129,7 +148,7 @@ Privacy rule for rollout files: they hold session content. Balancer reads only t
 
 `decisions.jsonl` in the data folder holds one JSON line per Agent call that reached a routing decision (not mode `off`, not ineligible calls). It is content-free: no brief, description or report text. Fields: `t` (epoch ms), `session`, `agentType`, `route`, `reason`, `claudeAfter`, `codexAfter` (scores after the task), `estimate` (`fiveHour`, `sevenDay`), `mode`, and for a Codex run `codexModel`, `durationMs`, `outcome`, `exitCode` and `delta` (points used in each window, when both readings are known). A Codex-routed call is written when its run ends, a Claude-routed one at the decision.
 
-Reason codes: `mode-off`, `mode-claude`, `mode-codex`, `codex-unavailable`, `codex-limit`, `codex-concurrency`, `codex-ceiling`, `claude-ceiling`, `no-codex-reading`, `codex-ahead`, `claude-ahead`, `codex-cooldown`.
+Reason codes: `mode-off`, `mode-claude`, `mode-codex`, `codex-unavailable`, `codex-limit`, `codex-concurrency`, `codex-ceiling`, `claude-ceiling`, `no-codex-reading`, `codex-ahead`, `claude-ahead`, `codex-cooldown`, `agent-excluded`, `codex-blocked`. `codex-blocked` is the Claude redo of a blocked Codex run (below); it copies `agentType`, `claudeAfter`, `codexAfter` and `estimate` from the Codex line, which carries `outcome` `blocked`. `/balance` appends the outcome to a last-decisions line when it is not `ok`, for example `impl -> codex (codex-ahead), blocked`.
 
 The file keeps the last 2000 lines. The file system API has no append, so each write reads and rewrites the file. A failing write never changes routing.
 
@@ -162,6 +181,7 @@ Set in the manifest's `userConfig`.
 | `ceilingFiveHour` | 95 | Do not route to a provider at or above this 5-hour use |
 | `ceilingSevenDay` | 97 | Same, weekly |
 | `eligibleAgentTypes` | `general-purpose,claude,Explore` | Comma-separated types that may run on Codex. A custom type with a found definition file is eligible regardless of this list (see What it routes) |
+| `excludedAgentTypes` | `plan-reviewer` | Comma-separated types that always stay on Claude, even in `codex` mode, logged as `agent-excluded`. Empty lets every eligible type route normally |
 | `effortMap` | `haiku=low,sonnet=medium,opus=high,default=high` | Agent `model` to Codex reasoning effort |
 | `modelMap` | `opus=gpt-6.1-sol,sonnet=gpt-6.1-terra` | Agent `model` to Codex model; exact matches win |
 | `codexModel` | empty | Fallback for unmapped calls and `/codex`; empty keeps Codex's default |
@@ -218,7 +238,10 @@ Tests are `test/*.test.ts(x)`, with the Done-when number in the name (`dw3_...`)
 - The decision log is read and rewritten on each write, so concurrent sessions may lose a line.
 - Decide-and-reserve is serialised per process only. Two sessions deciding at the same instant may both take the last Codex slot.
 - Custom agent files are found by file name only (not the `name` field, not subfolders). No `SendMessage` continuation of a Codex-run task. Forks, worktree or remote isolation, named agents and workflow agents stay on Claude.
-- A background Codex failure cannot fall back inside the call. It is reported in a message and followed by a 15-minute cooldown.
+- A background Codex failure cannot fall back inside the call. It is reported in a message and followed by a 15-minute cooldown. A background blocked run is the exception: it is redone once on Claude through `$.agent.spawn`, with no cooldown.
+- A blocked run is detected only from Codex's own words (see Blocked runs). A run that stops without saying so is logged `ok`, and sandbox denials are not seen at all.
+- `excludedAgentTypes` matches the type name only, so a plan review started as a `general-purpose` call stays eligible.
+- The blocked redo's spawn is tested against hand-driven hooks, because the test kit cannot return an agent id from `$.agent.spawn`; it was checked live once (2.1.321, background, one run).
 - A Claude limit with no known reset time is assumed to last one 5-hour window.
 - Claude's task cost is a fixed constant, with no learning.
 - Codex readings are whole points and can be minutes old. Margin, reservations and ceilings absorb this, so balance is approximate.
