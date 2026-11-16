@@ -764,3 +764,193 @@ test('dw25_a_stale_measure_for_the_same_windows_does_not_lower_the_row_or_the_st
   expect(w.statuses.at(-1)).toBe('C 5h 66 · 7d 10 │ X 5h 15 · 7d 2')
   expect((w.store.get('reading/claude') as any).fiveHour.used).toBe(66)
 })
+
+// ---------- DW29/DW30: writable root, git at the root, grants ----------
+
+const GPW = { subagent_type: 'general-purpose' }
+const addDirs = (w: any): string[] => {
+  const a: string[] = w.spawns[0]!.argv
+  return a.flatMap((x, i) => (x === '--add-dir' ? [a[i + 1]!] : []))
+}
+
+test('dw29a_subfolder_of_a_repo_adds_the_toplevel_and_keeps_cwd', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.cwd = '/up/pkg/sub'
+  w.toplevel = '/up'
+  w.commonDir = '/up/.git'
+  w.dirs.add('/up')
+  await $.tool.call(agent(GPW) as any)
+  expect(addDirs(w)).toEqual(['/up'])
+  expect(argAfter(w, '-C')).toBe('/up/pkg/sub')
+  expect(w.spawns[0]!.argv.indexOf('--add-dir')).toBeLessThan(w.spawns[0]!.argv.length - 1)
+})
+
+test('dw29a_cwd_at_the_toplevel_adds_nothing', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  await $.tool.call(agent(GPW) as any)
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw29a_no_repo_adds_the_session_root_when_cwd_is_strictly_inside', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = null
+  w.cwd = '/proj/sub'
+  w.root = '/proj'
+  w.dirs.add('/proj')
+  await $.tool.call(agent(GPW) as any)
+  expect(addDirs(w)).toEqual(['/proj'])
+  expect(argAfter(w, '-C')).toBe('/proj/sub')
+})
+
+test('dw29a_no_repo_cwd_equal_to_the_root_or_outside_it_adds_nothing', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = null
+  w.root = '/rootp' // cwd /proj is not inside it
+  w.dirs.add('/rootp')
+  await $.tool.call(agent(GPW) as any)
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw29a_no_repo_cwd_equal_to_the_root_adds_nothing', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = null
+  await $.tool.call(agent(GPW) as any) // root == cwd == /proj
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw30b_no_repo_unsafe_root_is_not_added', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = null
+  w.cwd = '/proj/sub'
+  w.root = '/'
+  w.dirs.add('/')
+  await $.tool.call(agent(GPW) as any)
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw29b_git_runs_at_the_toplevel_when_there_is_one', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = '/up'
+  w.commonDir = '/up/.git'
+  w.dirs.add('/up')
+  w.git = ['', ' M deep/f.py\n']
+  w.work.set('deep/f.py', 'X')
+  await $.tool.call(agent(GPW) as any)
+  expect(w.gitCalls.length).toBeGreaterThan(0)
+  expect(w.gitCwds.every(c => c === '/up')).toBe(true)
+  expect(w.gitCalls.some(c => c[1] === 'hash-object')).toBe(true)
+})
+
+test('dw29b_failed_run_saves_work_with_ls_files_and_diff_at_the_toplevel', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.script = 'fail'
+  w.toplevel = '/up'
+  w.commonDir = '/up/.git'
+  w.dirs.add('/up')
+  w.git = ['', ' M deep/f.py\n']
+  w.tracked.add('deep/f.py')
+  w.diff = 'D'
+  await $.tool.call(agent(GPW) as any)
+  const at = (k: string) => w.gitCalls.map((c, i) => [c[1], w.gitCwds[i]] as const).filter(x => x[0] === k)
+  expect(at('ls-files')).toEqual([['ls-files', '/up']])
+  expect(at('diff')).toEqual([['diff', '/up']])
+})
+
+test('dw29b_no_repo_keeps_the_shell_folder_for_git', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = null
+  w.git = [null]
+  await $.tool.call(agent(GPW) as any)
+  expect(w.gitCwds.length).toBeGreaterThan(0)
+  expect(w.gitCwds.every(c => c === CWD)).toBe(true)
+})
+
+test('dw29c_read_only_runs_get_no_add_dir_and_no_resolution', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = '/up'
+  w.dirs.add('/up')
+  w.files.set(`${DATA}/writable-dirs.json`, JSON.stringify({ '/up': ['/opt/g'] }))
+  w.dirs.add('/opt/g')
+  await $.tool.call(agent() as any) // Explore
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+  expect(w.processCalls.filter(c => c[1] === 'rev-parse')).toHaveLength(0)
+})
+
+test('dw29c_codex_command_uses_the_same_resolution', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = '/up'
+  w.commonDir = '/up/.git'
+  w.dirs.add('/up')
+  await codexCmd($, 'do the thing')
+  expect(addDirs(w)).toEqual(['/up'])
+})
+
+test('dw30a_grants_come_from_the_data_dir_file_keyed_by_the_main_repo_folder', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = '/wt/feature' // a linked worktree; the main checkout is /main/app
+  w.commonDir = '/main/app/.git'
+  w.dirs.add('/wt/feature')
+  w.dirs.add('/home/t/.cache/uv')
+  w.dirs.add('/other')
+  w.files.set(`${DATA}/writable-dirs.json`, JSON.stringify({
+    '/main/app': ['/home/t/.cache/uv', '/home/t/.cache/uv'], '/wt/feature': ['/other'],
+  }))
+  await $.tool.call(agent(GPW) as any)
+  expect(addDirs(w)).toEqual(['/wt/feature', '/home/t/.cache/uv'])
+})
+
+test('dw30a_without_a_repo_the_key_is_the_session_root', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = null
+  w.dirs.add('/opt/g')
+  w.files.set(`${DATA}/writable-dirs.json`, JSON.stringify({ [CWD]: ['/opt/g'] }))
+  await $.tool.call(agent(GPW) as any)
+  expect(addDirs(w)).toEqual(['/opt/g'])
+})
+
+test('dw30a_missing_or_broken_file_means_no_grants', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  await $.tool.call(agent(GPW) as any)
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw30a_unparseable_file_means_no_grants_and_no_error', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(`${DATA}/writable-dirs.json`, '{nope')
+  const r: any = await $.tool.call(agent(GPW) as any)
+  expect(r.result.status).toBe('completed')
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw30a_a_repo_file_cannot_add_grants', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.dirs.add('/opt/g')
+  w.files.set(`${CWD}/.claude/writable-dirs.json`, JSON.stringify({ [CWD]: ['/opt/g'] }))
+  w.files.set(`${CWD}/.claude/balancer.json`, JSON.stringify({ writableDirs: ['/opt/g'] }))
+  await $.tool.call(agent(GPW) as any)
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})
+
+test('dw30b_unsafe_or_missing_folders_are_skipped_and_valid_ones_kept', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.dirs.add('/')
+  w.dirs.add('/home/t')
+  w.dirs.add('/home')
+  w.dirs.add('/ok/dir')
+  w.fileStats.add('/a/file.txt')
+  w.files.set(`${DATA}/writable-dirs.json`, JSON.stringify({
+    [CWD]: ['/', '/home/t', '/home', 'rel/dir', '/a/../b', '/no/such', '/a/file.txt', '/ok/dir', '/ok/dir'],
+  }))
+  await $.tool.call(agent(GPW) as any)
+  expect(addDirs(w)).toEqual(['/ok/dir'])
+  expect(w.spawns[0]!.argv.join(' ')).not.toContain('dangerously')
+})
+
+test('dw30b_unsafe_toplevel_is_not_added', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.toplevel = '/home/t' // a dotfiles repo at the home folder
+  w.commonDir = '/home/t/.git'
+  w.dirs.add('/home/t')
+  await $.tool.call(agent(GPW) as any)
+  expect(w.spawns[0]!.argv).not.toContain('--add-dir')
+})

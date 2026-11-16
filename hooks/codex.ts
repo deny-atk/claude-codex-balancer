@@ -44,6 +44,7 @@ export function sandboxFor(agentType: string | undefined, planMode: boolean, too
 export function buildCodexArgv(o: {
   cwd: string; sandbox: Sandbox; effort: string; model?: string; outFile: string; prompt: string
   agent?: { type: string; body: string } // a custom type's instructions, placed between the preamble and the brief
+  addDirs?: string[] // extra writable folders; only a workspace-write run gets them
 }): { argv: string[]; input?: string } {
   const instructions = o.agent?.body
     ? `Instructions for the ${o.agent.type} agent you are acting as:\n${o.agent.body}\n\n`
@@ -52,11 +53,45 @@ export function buildCodexArgv(o: {
   const big = new TextEncoder().encode(full).length > PROMPT_ARG_LIMIT_BYTES
   const argv = [
     'codex', 'exec', '--json', '--skip-git-repo-check', '-C', o.cwd, '-s', o.sandbox,
+    ...(o.sandbox === 'workspace-write' ? (o.addDirs ?? []).flatMap(d => ['--add-dir', d]) : []),
     '-c', `model_reasoning_effort=${o.effort}`,
     ...(o.model ? ['-m', o.model] : []),
     '-o', o.outFile, big ? '-' : full,
   ]
   return big ? { argv, input: full } : { argv }
+}
+
+// ---------- writable folders ----------
+
+/** Syntax only: absolute, no `.`/`..` segment, not `/`, not the home folder or one of its ancestors. The caller checks existence. */
+export function safeDirSyntax(path: string, home: string | undefined): boolean {
+  if (!path.startsWith('/') || path.split('/').some(seg => seg === '.' || seg === '..')) return false
+  const p = path.replace(/\/+$/, '')
+  if (p === '') return false
+  const h = (home ?? '').replace(/\/+$/, '')
+  return !(h !== '' && (h === p || h.startsWith(p + '/')))
+}
+
+/** Output of `git rev-parse --path-format=absolute --show-toplevel --git-common-dir`: two lines. */
+export function parseGitRoots(stdout: string): { toplevel: string; commonDir: string } | null {
+  const [toplevel, commonDir] = stdout.split('\n').map(l => l.trim())
+  return toplevel && commonDir ? { toplevel, commonDir } : null
+}
+
+/** The main repository folder: all linked worktrees of one repository share their common dir. */
+export function projectKey(commonDir: string): string {
+  const d = commonDir.replace(/\/+$/, '')
+  return d.slice(0, d.lastIndexOf('/')) || '/'
+}
+
+/** The folders listed for `key` in the user's `writable-dirs.json`; anything unreadable is no grants. */
+export function grantsFor(text: string | undefined, key: string): string[] {
+  if (text === undefined) return []
+  try {
+    const all = JSON.parse(text)
+    const list = all && typeof all === 'object' && !Array.isArray(all) && Object.prototype.hasOwnProperty.call(all, key) ? all[key] : undefined
+    return Array.isArray(list) ? list.filter((d): d is string => typeof d === 'string') : []
+  } catch { return [] }
 }
 
 // ---------- event parser ----------

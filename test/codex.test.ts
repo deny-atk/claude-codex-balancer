@@ -4,7 +4,7 @@ import { agentDefPaths, codexEffort, configDirFor, parseAgentDef, unavailableToo
 import {
   PREAMBLE, parseEffortMap, effortFor, sandboxFor, buildCodexArgv, createEventParser, runCodex,
   gitSnapshot, changedSince, formatDuration, buildReport, buildFailureText,
-  completedRecord, asyncLaunchedRecord, taskStopRecord, newAgentId,
+  completedRecord, asyncLaunchedRecord, taskStopRecord, newAgentId, safeDirSyntax, parseGitRoots, projectKey, grantsFor,
 } from '../hooks/codex'
 
 const sleep = (ms: number) => new Promise<void>(r => (globalThis as any).setTimeout(r, ms))
@@ -498,4 +498,53 @@ test('dw19_big_instructions_still_go_through_stdin', () => {
   expect(argv[argv.length - 1]).toBe('-')
   expect(input).toStartWith(PREAMBLE + '\n\nInstructions for the implementer agent you are acting as:\nxxx')
   expect(input).toEndWith('\n\nbrief')
+})
+
+// ---------- DW29/DW30: writable roots and grants ----------
+
+test('dw29a_argv_add_dir_sits_before_the_prompt_and_cwd_stays', () => {
+  const { argv } = buildCodexArgv({ ...ARGS, cwd: '/proj/pkg/sub', addDirs: ['/proj', '/home/x/.cache/uv'] })
+  expect(argv.slice(argv.indexOf('-C'), argv.indexOf('-C') + 2)).toEqual(['-C', '/proj/pkg/sub'])
+  const i = argv.indexOf('--add-dir')
+  expect(argv.slice(i, i + 4)).toEqual(['--add-dir', '/proj', '--add-dir', '/home/x/.cache/uv'])
+  expect(i).toBeLessThan(argv.length - 1)
+  expect(argv.at(-1)).toBe(PREAMBLE + '\n\ndo it')
+})
+
+test('dw29c_read_only_argv_never_gets_add_dir', () => {
+  const { argv } = buildCodexArgv({ ...ARGS, sandbox: 'read-only', addDirs: ['/proj'] })
+  expect(argv).not.toContain('--add-dir')
+})
+
+test('dw29a_parseGitRoots_reads_toplevel_and_common_dir', () => {
+  expect(parseGitRoots('/proj\n/proj/.git\n')).toEqual({ toplevel: '/proj', commonDir: '/proj/.git' })
+  expect(parseGitRoots('/proj\n')).toBeNull()
+  expect(parseGitRoots('')).toBeNull()
+})
+
+test('dw30a_projectKey_is_the_parent_of_the_common_dir', () => {
+  expect(projectKey('/Users/example/Work/app/.git')).toBe('/Users/example/Work/app')
+  expect(projectKey('/Users/example/Work/app/.git/')).toBe('/Users/example/Work/app')
+})
+
+test('dw30a_grantsFor_reads_one_key_and_ignores_junk', () => {
+  const text = JSON.stringify({ '/p': ['/a', 3, '/b'], '/q': ['/c'], '/r': 'x' })
+  expect(grantsFor(text, '/p')).toEqual(['/a', '/b'])
+  expect(grantsFor(text, '/r')).toEqual([])
+  expect(grantsFor(text, '/none')).toEqual([])
+  expect(grantsFor('{not json', '/p')).toEqual([])
+  expect(grantsFor(undefined, '/p')).toEqual([])
+  expect(grantsFor('[1]', '/p')).toEqual([])
+})
+
+test('dw30b_safeDirSyntax_rejects_root_home_ancestors_relative_and_dot_segments', () => {
+  const home = '/Users/x'
+  for (const bad of ['/', '/Users/x', '/Users/x/', '/Users', 'rel/dir', '', '/a/../b', '/a/./b', '/a/..', '/Users/x/..']) {
+    expect(safeDirSyntax(bad, home), bad).toBe(false)
+  }
+  for (const good of ['/Users/x/.cache/uv', '/Users/x/Work/app', '/opt/tools', '/Users/y']) {
+    expect(safeDirSyntax(good, home), good).toBe(true)
+  }
+  expect(safeDirSyntax('/Users/x/Work', undefined)).toBe(true)
+  expect(safeDirSyntax('/', undefined)).toBe(false)
 })

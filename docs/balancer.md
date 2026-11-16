@@ -175,9 +175,25 @@ Set in the manifest's `userConfig`.
 
 Routing to Codex is on in every project. A brief sent to Codex goes to OpenAI, a different processor from Anthropic, so a project with private inputs should opt out: put `{ "codex": false }` in `.claude/balancer.json` in the project root. A missing or unparseable file does not opt out. The opt-out also stops `/codex`.
 
+## Writable folders
+
+A workspace-write Codex run can only write under its `-C` folder, which stays the session's shell folder so that relative paths in the brief keep their meaning. Balancer widens the writable set with `--add-dir` in these cases:
+
+- The shell folder is inside a git repository (`git rev-parse --path-format=absolute --show-toplevel --git-common-dir`) and the repository's top folder differs from it: the top folder is added. Say the session is in `/proj/pkg/sub` and the top folder is `/proj`: Codex gets `-C /proj/pkg/sub --add-dir /proj`.
+- The shell folder is not in a repository, but is strictly inside the session root: the root is added.
+- Git is also asked at the top folder when there is one (the status before and after the run, and the `ls-files` and `diff` that save work from a failed run), so changed files anywhere in the repository are seen. Without a repository it is asked at the shell folder.
+
+Further folders come from the user's grants file, `<data folder>/writable-dirs.json`, never from a file inside a repository. It maps a project key to a list of folders. The key is the main repository folder, the parent of the absolute git common dir, so every linked worktree of one repository shares one entry; with no repository the key is the session root. For a repository whose main checkout is `/Users/example/Work/app`, granting a tool cache:
+
+```json
+{ "/Users/example/Work/app": ["/Users/example/.cache/uv"] }
+```
+
+A missing or unparseable file grants nothing. A folder, granted or computed, is used only if it is an absolute path with no `.` or `..` segment, is not `/`, is not the home folder or one of its ancestors, and exists as a directory; anything else is skipped silently. Duplicates are passed once. Grants and the computed root apply to workspace-write runs only: read-only runs (Explore, plan mode, read-only agent files) get no `--add-dir`. `/codex` resolves them the same way. No danger flag is ever added. Codex's sandbox still denies process listing (for example `pgrep`), so a brief that needs it is blocked on Codex.
+
 ## Data folders
 
-- Data folder: `$CLAUDE_CONFIG_DIR/plugins/data/balancer/`, or `$HOME/.claude/plugins/data/balancer/` when that variable is unset. It holds `decisions.jsonl` and `runs/` with, per run, `<agentId>.txt` (the background output file, or the full text of a cut foreground report), `<agentId>.full.txt` (full text of a cut background report) and `<agentId>.last.txt` (Codex's own last-message file; Balancer writes it empty first, because Codex does not create the `runs/` folder).
+- Data folder: `$CLAUDE_CONFIG_DIR/plugins/data/balancer/`, or `$HOME/.claude/plugins/data/balancer/` when that variable is unset. It holds `decisions.jsonl`, the optional `writable-dirs.json` (see Writable folders) and `runs/` with, per run, `<agentId>.txt` (the background output file, or the full text of a cut foreground report), `<agentId>.full.txt` (full text of a cut background report) and `<agentId>.last.txt` (Codex's own last-message file; Balancer writes it empty first, because Codex does not create the `runs/` folder).
 - On session start, matching Codex run files older than seven days are pruned from `runs/`; missing folders and cleanup failures are ignored.
 - Shared store (the engine's per-plugin JSON file): `reading/claude`, `reading/codex`, `estimate/<agent type>`, `inflight/<id>`, `claude-inflight/<id>`. Writes are last-write-wins, one key per item.
 
@@ -197,6 +213,7 @@ Tests are `test/*.test.ts(x)`, with the Done-when number in the name (`dw3_...`)
 
 ## Current limitations
 
+- Codex's sandbox denies process listing (for example `pgrep`) even with extra writable folders, so a brief that needs it is blocked on Codex.
 - Plan mode is seen at the next prompt: a hook cannot read the session mode, so a mode changed mid-turn is missed until the next prompt, or an Agent `mode` argument.
 - The decision log is read and rewritten on each write, so concurrent sessions may lose a line.
 - Decide-and-reserve is serialised per process only. Two sessions deciding at the same instant may both take the last Codex slot.

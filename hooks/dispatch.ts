@@ -9,7 +9,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  codexModelFor, effortFor, gitSnapshot, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
+  codexModelFor, effortFor, gitSnapshot, grantsFor, parseGitRoots, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate } from './policy'
@@ -86,6 +86,7 @@ type Task = {
   base: string // `<data>/runs/<agentId>`: the patch and partial notes go beside the other run files
   estimate: Cost; codexBefore: ProviderReading | null
   entry: DecisionEntry
+  gitCwd?: string // set by runTask: the repository's top folder, where git paths are relative
 }
 
 type Settled =
@@ -454,18 +455,45 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
 
 // ---------- one Codex run, both modes ----------
 
+// Where Codex may write and where git is asked, for a workspace-write run (DW29, DW30). `gitCwd` is the repository's top
+// folder when there is one, since git status paths are relative to it. Grants come only from the user's data folder.
+async function writableRoots($: EngineInterface, st: State, cwd: string): Promise<{ gitCwd: string; addDirs: string[] }> {
+  const home = await $.env.get('HOME')
+  const usable = async (d: string) => {
+    if (!safeDirSyntax(d, home)) return false
+    try { return (await $.fs.stat(d)).kind === 'dir' } catch { return false }
+  }
+  let roots: { toplevel: string; commonDir: string } | null = null
+  try {
+    const r = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'], { cwd })
+    if (r.exitCode === 0) roots = parseGitRoots(r.stdout)
+  } catch { /* not a repository */ }
+  const root = await $.session.root()
+  const dirs: string[] = []
+  if (roots) {
+    if (roots.toplevel !== cwd && (await usable(roots.toplevel))) dirs.push(roots.toplevel)
+  } else if (cwd.startsWith(root.replace(/\/+$/, '') + '/') && (await usable(root))) dirs.push(root)
+  let grants: string[] = []
+  try { grants = grantsFor(await $.fs.read(`${await dataDir($, st)}/writable-dirs.json`), roots ? projectKey(roots.commonDir) : root) } catch { /* no file */ }
+  for (const d of grants) if (await usable(d)) dirs.push(d)
+  return { gitCwd: roots?.toplevel ?? cwd, addDirs: [...new Set(dirs)] }
+}
+
 async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSignal, fullTextPath: string): Promise<Settled> {
   const git = c.sandbox === 'workspace-write'
+  // nothing here may throw before the run owns its reservation
+  const roots = git ? await writableRoots($, st, c.cwd).catch(() => ({ gitCwd: c.cwd, addDirs: [] as string[] })) : { gitCwd: c.cwd, addDirs: [] as string[] }
+  c.gitCwd = roots.gitCwd
   let run: CodexRun
   let before: string[] | null = null
   let overlapped = false
   try {
-    if (git) before = await gitSnapshot($, c.cwd)
+    if (git) before = await gitSnapshot($, roots.gitCwd)
     // Codex does not create the folder of its -o file; $.fs.write makes missing parents.
     try { await $.fs.write(c.outFile, '') } catch { /* best effort */ }
     const built = buildCodexArgv({
       cwd: c.cwd, sandbox: c.sandbox, effort: c.effort, model: c.model,
-      outFile: c.outFile, prompt: c.prompt, ...(c.agent ? { agent: c.agent } : {}),
+      outFile: c.outFile, prompt: c.prompt, addDirs: roots.addDirs, ...(c.agent ? { agent: c.agent } : {}),
     })
     run = await runCodex($, {
       argv: built.argv, ...(built.input !== undefined ? { input: built.input } : {}),
@@ -516,7 +544,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   await observe($, st)
 
   if (run.outcome === 'aborted') return { kind: 'aborted' }
-  const afterGit = git ? await gitSnapshot($, c.cwd) : null
+  const afterGit = git ? await gitSnapshot($, roots.gitCwd) : null
   if (run.outcome === 'ok' && run.finalMessage !== undefined) {
     const cut = run.finalMessage.length > st.opts.maxResultChars
     if (cut) { try { await $.fs.write(fullTextPath, run.finalMessage) } catch { /* the report still says it was cut */ } }
@@ -546,12 +574,12 @@ async function saveWork($: EngineInterface, c: Task, run: CodexRun, changed: str
   if (run.threadId && (run.limitHit || run.outcome === 'timeout')) saved.resumeThreadId = run.threadId
   if (changed && changed.length > 0) {
     try {
-      const ls = await $.process.run(['git', 'ls-files', '-z', '--', ...changed], { cwd: c.cwd })
+      const ls = await $.process.run(['git', 'ls-files', '-z', '--', ...changed], { cwd: c.gitCwd ?? c.cwd })
       if (ls.exitCode === 0) {
         const tracked = ls.stdout.split('\0').filter(Boolean)
         saved.untracked = changed.filter(p => !tracked.includes(p))
         if (tracked.length > 0) {
-          const d = await $.process.run(['git', 'diff', 'HEAD', '--', ...tracked], { cwd: c.cwd })
+          const d = await $.process.run(['git', 'diff', 'HEAD', '--', ...tracked], { cwd: c.gitCwd ?? c.cwd })
           if (d.exitCode === 0 && d.stdout.length > 0) {
             await $.fs.write(`${c.base}.patch`, d.stdout)
             saved.patchPath = `${c.base}.patch`

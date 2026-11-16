@@ -44,6 +44,12 @@ export type World = {
   diff: string // stdout of `git diff HEAD -- ...`
   partial?: string // an agent_message the stub emits before a failure or limit
   gitCalls: string[][] // every git argv
+  gitCwds: (string | undefined)[] // cwd of each entry of gitCalls
+  cwd: string // what $.session.cwd() answers
+  toplevel: string | null // what `git rev-parse --show-toplevel` answers; null = not a repository
+  commonDir: string // what `--git-common-dir` answers
+  dirs: Set<string> // extra existing folders for $.fs.stat
+  fileStats: Set<string> // paths $.fs.stat reports as regular files
   work: Map<string, string> // file contents the stubbed `git hash-object` hashes, by path
   during?: () => void // runs when a Codex process starts: a test edits `work` here
   gate: Promise<void> // script 'gate': the run finishes once this resolves
@@ -94,7 +100,7 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], stopCalls: [],
-    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [],
+    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(),
     gate: undefined as any, openGate: () => {},
     git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
@@ -103,7 +109,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   w.clock = mock.clock(on, { now: NOW })
   mock.env(on, { HOME, CLAUDE_CONFIG_DIR: CFG })
 
-  on('session.cwd', () => ({ value: CWD }))
+  on('session.cwd', () => ({ value: w.cwd }))
   on('session.root', () => ({ value: w.root }))
   on('session.id', () => ({ value: SID }))
   on('session.usage', () => ({ value: { rateLimits: w.usage } }))
@@ -114,7 +120,9 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('store.keys', () => ({ value: [...w.store.keys()] }))
 
   on('fs.stat', (_$: any, e: any) => {
-    if (e.path === CWD && w.cwdExists) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
+    if (e.path === w.cwd && w.cwdExists) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
+    if (w.dirs.has(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
+    if (w.fileStats.has(e.path)) return { value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } }
     throw new Error('ENOENT')
   })
   on('fs.read', (_$: any, e: any) => {
@@ -137,7 +145,10 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     w.processCalls.push([...e.argv])
     if (a === 'rm') return { value: { exitCode: 0, stdout: '', stderr: '' } }
     if (a === 'codex' && b === 'login') { w.loginChecks++; if (w.loginThrows) throw new Error('spawn codex ENOENT'); return { value: { exitCode: w.loggedIn ? 0 : 1, stdout: '', stderr: '' } } }
-    if (a === 'git') w.gitCalls.push([...(e.argv as string[])])
+    if (a === 'git' && b === 'rev-parse') {
+      return { value: w.toplevel === null ? { exitCode: 128, stdout: '', stderr: 'not a git repository' } : { exitCode: 0, stdout: `${w.toplevel}\n${w.commonDir}\n`, stderr: '' } }
+    }
+    if (a === 'git') { w.gitCalls.push([...(e.argv as string[])]); w.gitCwds.push(e.init?.cwd) }
     if (a === 'git' && b === 'ls-files') {
       const paths = (e.argv as string[]).slice((e.argv as string[]).indexOf('--') + 1)
       return { value: { exitCode: 0, stdout: paths.filter(p => w.tracked.has(p)).map(p => p + '\0').join(''), stderr: '' } }
