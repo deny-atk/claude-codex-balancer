@@ -234,7 +234,7 @@ for (const [id, over] of [['effort', { effort: 'high' }], ['mode', { mode: 'acce
     expect(d.submits).toHaveLength(1)
     expect(d.submits[0]).toStartWith(
       `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. It was not redone on Claude ` +
-      `because the call set ${id}, which a redo started by Balancer cannot carry. Delegate it again.`,
+      `because the call set ${id}, which a redo started by Balancer cannot carry. Delegate it again with the same description; that call will run on Claude.`,
     )
     expect(d.submits[0]).toContain(codex.partialBlock('blocked', NOTES))
     expect(d.log().map(l => l.reason)).toEqual(['codex-ahead'])
@@ -248,7 +248,7 @@ for (const [id, over, why] of [['deny', { agentSpawnDeny: 'no agents' }, 'no age
     expect(claudeKeys(w)).toEqual([])
     expect(w.submits).toHaveLength(1)
     const head = `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed, and the Claude redo could not start (`
-    const tail = `). Delegate it again.\n\n${codex.partialBlock('blocked', NOTES)}`
+    const tail = `). Delegate it again with the same description; that call will run on Claude.\n\n${codex.partialBlock('blocked', NOTES)}`
     expect(w.submits[0]!.startsWith(head) && w.submits[0]!.endsWith(tail)).toBe(true)
     if (why) expect(w.submits[0]).toBe(head + why + tail)
     expect(logLines(w).map(l => l.reason)).toEqual(['codex-ahead'])
