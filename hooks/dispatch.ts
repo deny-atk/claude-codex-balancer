@@ -100,6 +100,9 @@ type Settled =
 
 // What a stopped run left behind besides edited files (item: work is saved when Codex hits a limit).
 type Saved = { patchPath?: string; untracked?: string[]; partial?: { text: string; path?: string }; resumeThreadId?: string }
+type RunRecord = Pick<Task, 'agentId' | 'sessionId' | 'description' | 'rowId' | 'sandbox' | 'outFile' | 'base' | 'type' | 'entry'> & {
+  background: boolean; gitCwd: string; before: string[] | null; startedAt: number
+}
 
 const failureText = (s: { reason: string; changed: string[] | null; sandbox: Sandbox; saved: Saved }) =>
   buildFailureText({ reason: s.reason, changedFiles: s.changed, sandbox: s.sandbox, ...s.saved })
@@ -124,6 +127,8 @@ export function createState(options: PluginOptions) {
     completedEarly: new Set<string>(), // agent ids whose turn.complete came before their reservation was mapped (at most 100)
     recent: [] as DecisionEntry[],
     runs: new Map<string, { ac: AbortController; sessionId: string; description: string; done: Promise<void> }>(),
+    reconciled: false, // leftover run records are checked once per module instance
+    reconciling: new Set<string>(), // agent ids this instance already reported lost
     claudeReservations: new Map<string, string>(),
     claudeAgents: new Map<string, string>(),
     sessionMode: undefined as Mode | undefined,
@@ -157,6 +162,68 @@ export async function pruneRuns($: EngineInterface, st: State): Promise<void> {
       .map(e => `${dir}/${e.name}`)
     if (paths.length) await $.process.run(['rm', '-f', '--', ...paths])
   } catch { /* Missing directories and cleanup failures do not prevent startup. */ }
+}
+
+type Lost = { agentId: string; text?: string } // text: what the calling session must be told (its own runs only)
+
+// Releases the reservation, logs outcome lost and builds the caller's message. The record stays: the caller deletes it
+// once the message is delivered (a duplicate on a crash beats a dropped message).
+async function lostRun($: EngineInterface, st: State, record: RunRecord, current: boolean): Promise<Lost> {
+  st.reconciling.add(record.agentId)
+  await quietly(() => removeInflight($, record.agentId))
+  await quietly(() => writeLog($, st, { ...record.entry, outcome: 'lost' }))
+  if (!current) return { agentId: record.agentId }
+  let changed: string[] | null = []
+  let notes = ''
+  if (record.sandbox === 'workspace-write') {
+    changed = null
+    await quietly(async () => { changed = changedSince(record.before, await gitSnapshot($, record.gitCwd)) })
+  }
+  await quietly(async () => { notes = await $.fs.read(record.outFile) })
+  await quietly(() => setRun($, record.rowId, null))
+  let detail = ' Nothing was changed; delegate it again.'
+  if (changed === null) detail = ' The change check is unknown; do not re-run blindly.'
+  else if (changed.length) {
+    const saved = await saveWork($, { ...record, cwd: record.gitCwd }, {} as CodexRun, changed)
+    detail = ` ${failureText({ reason: 'lost', changed, sandbox: record.sandbox, saved })}`
+  }
+  const text = `[balancer] Codex run "${record.description}" (${record.agentId}) ended without a result: Balancer was reloaded or restarted while it ran.` +
+    detail + (notes.trim() ? `\n\n${partialBlock('lost', notes)}` : '')
+  return { agentId: record.agentId, text }
+}
+
+async function dropRecord($: EngineInterface, agentId: string): Promise<void> {
+  await quietly(() => $.store.delete(`run/${agentId}`))
+}
+
+/** Runs a fresh module instance's check of leftover run records, once: this session's records died with an earlier
+ * instance (a plugin reload or a restarted process); another session's are cleared only once older than any run can be. */
+async function findLost($: EngineInterface, st: State): Promise<Lost[]> {
+  if (st.reconciled) return []
+  st.reconciled = true
+  const out: Lost[] = []
+  await quietly(async () => {
+    const session = await $.session.id()
+    const now = await $.clock.now()
+    for (const key of (await $.store.keys()).filter(k => k.startsWith('run/'))) {
+      await quietly(async () => {
+        const record = await $.store.get(key) as RunRecord | undefined
+        if (!record?.agentId || st.runs.has(record.agentId) || st.reconciling.has(record.agentId)) return
+        const current = record.sessionId === session
+        if (current || now - record.startedAt > st.opts.taskTimeoutMs + 5 * MIN_MS) out.push(await lostRun($, st, record, current))
+      })
+    }
+  })
+  return out
+}
+
+/** At session start: each message is submitted as a turn of its own. Not awaited, since submit resolves only once the
+ * prompt has entered; the record goes after that, so a module that dies first sends it again from the next one. */
+export async function reconcileRuns($: EngineInterface, st: State): Promise<void> {
+  for (const l of await findLost($, st)) {
+    if (l.text === undefined) await dropRecord($, l.agentId)
+    else void $.prompt.submit({ text: l.text }).then(() => dropRecord($, l.agentId), () => {})
+  }
 }
 
 // ---------- readings ----------
@@ -433,37 +500,38 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     const abort = () => ac.abort()
     if (next.signal.aborted) abort()
     else next.signal.addEventListener('abort', abort, { once: true })
-    const done = runTask($, st, task, ac.signal, `${dd}/runs/${agentId}.txt`)
+    const done = runTask($, st, task, ac.signal, `${dd}/runs/${agentId}.txt`, false)
     st.runs.set(agentId, { ac, sessionId, description: e.description, done: done.then(() => {}, () => {}) })
     let s: Settled
-    try { s = await done } finally {
-      st.runs.delete(agentId)
-      next.signal.removeEventListener('abort', abort)
-    }
-    if (s.kind === 'ok') {
-      return { result: completedRecord({ agentId, text: s.report, prompt: e.prompt, durationMs: s.durationMs, agentType: type }) }
-    }
+    try {
+    s = await done
+    await quietly(() => $.store.delete(`run/${agentId}`)) // Codex has ended; a reload during a Claude fallback is not a lost Codex run
+    if (s.kind === 'ok') return { result: completedRecord({ agentId, text: s.report, prompt: e.prompt, durationMs: s.durationMs, agentType: type }) }
     if (s.kind === 'aborted') return { deny: 'Balancer: the Codex run was interrupted' }
     if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
       await fellBack($, st, task, s.reason)
       if (s.reason === 'blocked') await logRedo($, st, task)
-      // The call goes through untouched: in auto mode the classifier refuses an input a hook changed after its review,
-      // and the model's own retry would land on Codex again. Codex's notes stay in the run's .partial.txt file.
       const reservation = newAgentId()
-      try { await reserveClaude($, st, reservation, sessionId, type, await $.clock.now()) } catch { return next(e) } // the call still goes through
-      return nextOnClaude($, st, reservation, e, next)
+      try { await reserveClaude($, st, reservation, sessionId, type, await $.clock.now()) } catch { return await next(e) }
+      return await nextOnClaude($, st, reservation, e, next)
     }
     return { result: completedRecord({ agentId, text: failureText(s), prompt: e.prompt, durationMs: 0, agentType: type }) }
+    } finally {
+      await quietly(() => $.store.delete(`run/${agentId}`))
+      st.runs.delete(agentId)
+      next.signal.removeEventListener('abort', abort)
+    }
   }
 
   const outputFile = `${dd}/runs/${agentId}.txt`
   const ac = new AbortController()
   const done = (async () => {
     try {
-      await deliverBackground($, st, task, await runTask($, st, task, ac.signal, `${dd}/runs/${agentId}.full.txt`), outputFile)
+      await deliverBackground($, st, task, await runTask($, st, task, ac.signal, `${dd}/runs/${agentId}.full.txt`, true), outputFile)
     } catch {
       // a detached run has nobody to throw to
     } finally {
+      await quietly(() => $.store.delete(`run/${agentId}`))
       st.runs.delete(agentId)
     }
   })()
@@ -504,7 +572,7 @@ async function writableRoots($: EngineInterface, st: State, cwd: string): Promis
   return { gitCwd: roots?.toplevel ?? cwd, addDirs: [...new Set(dirs)] }
 }
 
-async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSignal, fullTextPath: string): Promise<Settled> {
+async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSignal, fullTextPath: string, background: boolean): Promise<Settled> {
   const git = c.sandbox === 'workspace-write'
   // nothing here may throw before the run owns its reservation
   const roots = git ? await writableRoots($, st, c.cwd).catch(() => ({ gitCwd: c.cwd, addDirs: [] as string[] })) : { gitCwd: c.cwd, addDirs: [] as string[] }
@@ -514,6 +582,8 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
   let overlapped = false
   try {
     if (git) before = await gitSnapshot($, roots.gitCwd)
+    const record: RunRecord = { agentId: c.agentId, sessionId: c.sessionId, description: c.description, background, ...(c.rowId ? { rowId: c.rowId } : {}), sandbox: c.sandbox, gitCwd: roots.gitCwd, before, outFile: c.outFile, base: c.base, startedAt: await $.clock.now(), type: c.type, entry: c.entry }
+    await quietly(() => $.store.set(`run/${c.agentId}`, record))
     // Codex does not create the folder of its -o file; $.fs.write makes missing parents.
     try { await $.fs.write(c.outFile, '') } catch { /* best effort */ }
     const built = buildCodexArgv({
@@ -589,7 +659,7 @@ async function runTask($: EngineInterface, st: State, c: Task, signal: AbortSign
 }
 
 // Best effort, never throws: a failed write or git call changes nothing but what the text can name.
-async function saveWork($: EngineInterface, c: Task, run: CodexRun, changed: string[] | null): Promise<Saved> {
+async function saveWork($: EngineInterface, c: Pick<Task, 'base' | 'gitCwd' | 'cwd'>, run: CodexRun, changed: string[] | null): Promise<Saved> {
   const saved: Saved = {}
   if (run.finalMessage) {
     saved.partial = { text: run.finalMessage }
@@ -696,7 +766,22 @@ async function fellBack($: EngineInterface, st: State, c: Task, reason: string, 
 export async function onTaskStop($: EngineInterface, st: State, e: TaskStopCall, next: Next<'tool.call', TaskStopCall>) {
   const id = e.task_id ?? e.shell_id
   const run = id === undefined ? undefined : st.runs.get(id)
-  if (id === undefined || !run) return next(e)
+  if (id === undefined) return next(e)
+  if (!run) {
+    const record = await $.store.get(`run/${id}`) as RunRecord | undefined
+    if (record?.agentId === id && record.sessionId !== await $.session.id()) {
+      return { deny: `Balancer: Codex run ${id} belongs to another session; only that session can stop it.` }
+    }
+    if (record?.agentId === id && !st.reconciling.has(id)) {
+      // The run died with an earlier module instance; the answer itself tells the model, so no prompt is submitted.
+      const lost = await lostRun($, st, record, true)
+      await dropRecord($, id)
+      const stopped = taskStopRecord({ taskId: id, description: record.description })
+      return { result: lost.text ? { ...stopped, message: lost.text } : stopped }
+    }
+    if (id.startsWith('codex-')) return { deny: `Balancer: Codex run ${id} is not running; it already ended. Its result, if any, was delivered as a message.` }
+    return next(e)
+  }
   run.ac.abort()
   await run.done // the child is killed and the reservation released before the model hears back
   return { result: taskStopRecord({ taskId: id, description: run.description }) }
@@ -795,11 +880,18 @@ export async function onBalance($: EngineInterface, st: State, args: string): Pr
 
 // ---------- nudge (PRD 9) ----------
 
-/** Attaches the armed reminder to a typed prompt, once. Not to a slash command or a prompt the person did not type. */
-export function onPromptSubmit(st: State, e: PromptSubmitInput, next: Next<'prompt.submit'>) {
-  if (modeNow(st) === 'off' || modeNow(st) === 'claude' || !st.tight || !st.armed || e.command || e.isMeta) return next(e)
-  st.armed = false
-  return next({ ...e, context: [...(e.context ?? []), NUDGE_TEXT] })
+/** Attaches the armed reminder to a typed prompt, once. Not to a slash command or a prompt the person did not type.
+ * When session.start did not check leftover run records, the first typed prompt does, and carries their messages as
+ * context: a prompt submitted from inside this hook would wait for an idle session. */
+export async function onPromptSubmit($: EngineInterface, st: State, e: PromptSubmitInput, next: Next<'prompt.submit'>) {
+  const typed = !e.command && !e.isMeta
+  const lost = typed ? await findLost($, st) : []
+  const notes = lost.flatMap(l => l.text === undefined ? [] : [l.text])
+  const nudge = typed && modeNow(st) !== 'off' && modeNow(st) !== 'claude' && st.tight && st.armed
+  if (nudge) st.armed = false
+  const r = notes.length || nudge ? await next({ ...e, context: [...(e.context ?? []), ...notes, ...(nudge ? [NUDGE_TEXT] : [])] }) : await next(e)
+  for (const l of lost) await dropRecord($, l.agentId)
+  return r
 }
 
 // ---------- /codex <task> (PRD 10) ----------
@@ -847,12 +939,13 @@ export async function onCodexCommand($: EngineInterface, st: State, args: string
   st.runs.set(agentId, { ac, sessionId, description: '/codex', done })
   let s: Settled
   try {
-    s = await runTask($, st, c, ac.signal, `${dd}/runs/${agentId}.full.txt`)
+    s = await runTask($, st, c, ac.signal, `${dd}/runs/${agentId}.full.txt`, false)
+    if (s.kind === 'ok') return { text: s.report }
+    if (s.kind === 'aborted') return { text: 'The Codex run was interrupted.' }
+    return { text: failureText(s) }
   } finally {
+    await quietly(() => $.store.delete(`run/${agentId}`))
     st.runs.delete(agentId)
     finish()
   }
-  if (s.kind === 'ok') return { text: s.report }
-  if (s.kind === 'aborted') return { text: 'The Codex run was interrupted.' }
-  return { text: failureText(s) }
 }

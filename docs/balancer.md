@@ -123,11 +123,43 @@ Sandbox denials are not counted. The `codex exec --json` stream has no event for
 
 A failure means a non-zero exit, no final message, or a timeout (`taskTimeoutMinutes`). A background failure cannot fall back to Claude in the same call, because the call was already answered; that is why the message and cooldown exist.
 
+### Runs lost to a reload or restart
+
+Installing or updating a plugin makes the desktop app reload plugins in every live session. A reload unloads Balancer's module, which kills its Codex children, and the old module can no longer log or report. Module memory starts over; `$.store` survives.
+
+So every Codex run (foreground, background and `/codex`) writes a record, `run/<agent id>`, after the before-snapshot and before Codex starts. The record holds the session id, description, sandbox, git folder, before-snapshot, output file paths and the decision entry, never the prompt. It is deleted once the result is delivered.
+
+A fresh module checks the leftover records once. For each record of its own session:
+
+- it releases the Codex reservation;
+- it logs the decision entry with outcome `lost`;
+- it compares the git folder with the before-snapshot;
+- it tells the caller once that the run ended without a result, whether files changed (none, the list with the saved patch, or unknown), and adds any final message Codex had already written.
+
+There is no redo and no cooldown.
+
+How the message reaches the caller depends on where the check runs:
+
+- **Session start:** the message is submitted as a turn of its own.
+- **The first typed prompt,** when session start did not run the check: the message rides on that prompt as context, because a prompt submitted from inside a hook would wait for an idle session.
+- **TaskStop on the lost run's id:** the message is the TaskStop answer.
+
+The record is deleted only after the message has entered. A module that dies in between sends it again, so a duplicate is possible but a dropped message is not.
+
+Records of other sessions are left alone, since their runs may be alive. Once older than `taskTimeoutMinutes` plus 5 minutes they are logged `lost` and deleted without a message.
+
+Limits:
+
+- A Codex run does not survive a reload, and nothing is resumed.
+- A reload also resets the session's `/balance` mode and drops Claude reservations held in memory, which then age out after `taskTimeoutMinutes`.
+- A record that cannot be stored (the store is full) leaves that run unguarded.
+- What a foreground call returns when its module is unloaded mid-run is up to the engine.
+
 ## TaskStop, interrupts and session end
 
-`TaskStop` with the id of a Balancer background run stops that run: the Codex process is killed, the reservation is released, and Balancer answers with a stopped-task result. A `TaskStop` for any other id passes through.
+`TaskStop` with the id of a Balancer background run stops that run: the Codex process is killed, the reservation is released, and Balancer answers with a stopped-task result. For the id of a run lost to a reload, the answer is the lost-run message above. For the id of another session's run, the call is refused. For a `codex-` id with no run and no record, the call is refused with a "not running; it already ended" reason. Any other id passes through.
 
-Interrupting a foreground run ends the hook's wait and kills the process, then releases the reservation once the process has exited (the wait for the exit is capped at 5 seconds, so a stuck cleanup cannot hang the hook); the call gets a denial saying the run was interrupted. Ending the session aborts that session's foreground and background runs and delivers nothing. Unloading the module kills detached children, and their reservations expire after `taskTimeoutMinutes`. An aborted run is logged and adds no estimate sample.
+Interrupting a foreground run ends the hook's wait and kills the process, then releases the reservation once the process has exited (the wait for the exit is capped at 5 seconds, so a stuck cleanup cannot hang the hook); the call gets a denial saying the run was interrupted. Ending the session aborts that session's foreground and background runs and delivers nothing. An aborted run is logged and adds no estimate sample.
 
 ## Where readings come from
 
@@ -149,7 +181,7 @@ Privacy rule for rollout files: they hold session content. Balancer reads only t
 
 ## Decision log
 
-`decisions.jsonl` in the data folder holds one JSON line per Agent call that reached a routing decision (not mode `off`, not ineligible calls). It is content-free: no brief, description or report text. Fields: `t` (epoch ms), `session`, `agentType`, `route`, `reason`, `claudeAfter`, `codexAfter` (scores after the task), `estimate` (`fiveHour`, `sevenDay`), `mode`, and for a Codex run `codexModel`, `durationMs`, `outcome`, `exitCode` and `delta` (points used in each window, when both readings are known). A Codex-routed call is written when its run ends, a Claude-routed one at the decision.
+`decisions.jsonl` in the data folder holds one JSON line per Agent call that reached a routing decision (not mode `off`, not ineligible calls). It is content-free: no brief, description or report text. Fields: `t` (epoch ms), `session`, `agentType`, `route`, `reason`, `claudeAfter`, `codexAfter` (scores after the task), `estimate` (`fiveHour`, `sevenDay`), `mode`, and for a Codex run `codexModel`, `durationMs`, `outcome`, `exitCode` and `delta` (points used in each window, when both readings are known). A Codex-routed call is written when its run ends, a Claude-routed one at the decision. A run lost to a reload or restart is written by the next module instance, with `outcome` `lost` and no duration or exit code.
 
 Reason codes: `mode-off`, `mode-claude`, `mode-codex`, `codex-unavailable`, `codex-limit`, `codex-concurrency`, `codex-ceiling`, `claude-ceiling`, `no-codex-reading`, `codex-ahead`, `claude-ahead`, `codex-cooldown`, `agent-excluded`, `model-excluded`, `codex-blocked`. `codex-blocked` is the Claude redo of a blocked Codex run (below); it copies `agentType`, `claudeAfter`, `codexAfter` and `estimate` from the Codex line, which carries `outcome` `blocked`. `/balance` appends the outcome to a last-decisions line when it is not `ok`, for example `impl -> codex (codex-ahead), blocked`.
 
