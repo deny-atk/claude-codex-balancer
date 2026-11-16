@@ -84,6 +84,7 @@ type Task = {
   rowId?: string // the Agent call's tool_use_id: the row that shows the run's line
   cwd: string; sandbox: Sandbox; model?: string; effort: string; outFile: string
   callModel?: string // the Agent call's own `model` argument, for a Claude redo; `model` is the Codex one
+  noRedo?: 'effort' | 'mode' // set by the call but not carried by $.agent.spawn, so a blocked run is not redone
   agent?: { type: string; body: string } // a custom type's instructions, carried to Codex
   base: string // `<data>/runs/<agentId>`: the patch and partial notes go beside the other run files
   estimate: Cost; codexBefore: ProviderReading | null
@@ -409,6 +410,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
     outFile: `${dd}/runs/${agentId}.last.txt`, base: `${dd}/runs/${agentId}`,
     model: codexModelFor(model, st.opts.modelMap, st.opts.codexModel),
     ...(e.model !== undefined ? { callModel: e.model } : {}),
+    ...((e as { effort?: string }).effort !== undefined ? { noRedo: 'effort' as const } : (e as { mode?: string }).mode !== undefined ? { noRedo: 'mode' as const } : {}),
     ...(def ? { agent: { type, body: def.body } } : {}),
     estimate: picked.estimate, codexBefore: picked.codex, entry: picked.entry,
   }
@@ -598,11 +600,14 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
   } else if (s.reason === 'blocked' && (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0))) {
     // Nothing was changed, so the task is redone once on Claude: no cooldown, since Codex itself worked.
     const notes = s.saved.partial ? partialBlock('blocked', s.saved.partial.text) : undefined
-    const r = await startRedo($, st, c, notes)
+    const r = c.noRedo ? { failed: c.noRedo } : await startRedo($, st, c, notes)
     // The engine delivers the redo's own report as its notification; this message only links it to the Codex id the model holds.
     text = 'agentId' in r
       ? `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed. ` +
         `Balancer is redoing it once on Claude as background agent ${r.agentId}; its report will come from that agent.`
+      : c.noRedo
+      ? `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed. It was not redone on Claude ` +
+        `because the call set ${c.noRedo}, which a redo started by Balancer cannot carry. Delegate it again.` + (notes ? `\n\n${notes}` : '')
       : `[balancer] Codex reported "${c.description}" (${c.agentId}) blocked, nothing was changed, and the Claude redo could not start (${r.failed}). Delegate it again.` +
         (notes ? `\n\n${notes}` : '')
   } else if (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0)) {
@@ -633,7 +638,7 @@ async function startRedo($: EngineInterface, st: State, c: Task, notes: string |
   try {
     await reserveClaude($, st, reservation, c.sessionId, c.type, await $.clock.now())
     const r = await $.agent.spawn({
-      prompt: notes ? `${c.prompt}\n\n${notes}` : c.prompt, description: c.description, subagentType: c.type,
+      prompt: notes ? `${c.prompt}\n\n${notes}` : c.prompt, description: c.description, subagentType: c.type, cwd: c.cwd,
       ...(c.callModel !== undefined ? { model: c.callModel } : {}),
     })
     const deny = (r as { deny?: string }).deny

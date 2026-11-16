@@ -184,7 +184,7 @@ test('dw34_blocked_background_spawns_one_redo_with_the_original_fields', async (
   await d.launch({ model: 'opus' })
   expect(d.spawned).toEqual([{
     prompt: `PROMPT-SECRET-77 look around\n\n${codex.partialBlock('blocked', NOTES)}`,
-    description: 'DESC-SECRET-88', subagentType: 'Explore', model: 'opus',
+    description: 'DESC-SECRET-88', subagentType: 'Explore', model: 'opus', cwd: '/proj', // dw39: the call's folder
   }])
   expect(d.codexRuns()).toBe(1) // Codex ran once; the redo did not go back to it
   expect(d.toasts).toContain('Balancer: Codex reported blocked, redoing the task on Claude.')
@@ -211,6 +211,23 @@ test('dw38_no_cooldown_a_reservation_through_the_redo_and_one_message_at_spawn_o
   expect(d.claude()).toEqual([])
   expect(d.submits).toHaveLength(1) // the engine delivers the redo's own report; Balancer adds nothing at its end
 })
+
+for (const [id, over] of [['effort', { effort: 'high' }], ['mode', { mode: 'acceptEdits' }]] as const) {
+  test(`dw39_a_call_with_${id}_is_not_redone_since_a_spawn_cannot_carry_it`, async () => {
+    const d = driven()
+    const codexId = await d.launch(over)
+    expect(d.spawned).toEqual([])
+    expect(d.claude()).toEqual([])
+    expect(d.st.cooldownUntil).toBe(0)
+    expect(d.submits).toHaveLength(1)
+    expect(d.submits[0]).toStartWith(
+      `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. It was not redone on Claude ` +
+      `because the call set ${id}, which a redo started by Balancer cannot carry. Delegate it again.`,
+    )
+    expect(d.submits[0]).toContain(codex.partialBlock('blocked', NOTES))
+    expect(d.log().map(l => l.reason)).toEqual(['codex-ahead'])
+  })
+}
 
 for (const [id, over, why] of [['deny', { agentSpawnDeny: 'no agents' }, 'no agents'], ['throw', { agentSpawnThrow: 'boom' }, undefined]] as const) {
   test(`dw34_redo_that_cannot_start_${id}_releases_and_tells_the_model`, async ($, on) => {
