@@ -69,6 +69,7 @@ export type World = {
   failStoreWrites: boolean
   statuses: (string | undefined)[] // every $.ui.status call, in order
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
+  submitFails?: boolean // a prompt.submit reaching the bottom throws
   pkillFinds?: boolean // `pkill` reports that it signalled a process
   submitGate?: Promise<void> // a prompt.submit reaching the bottom waits for this: the prompt has not entered yet
   state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
@@ -219,7 +220,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('tool.register', (_$: any, e: any) => { w.toolOps.push(`register ${e.name}`); return { value: { name: e.name } } })
   on('tool.list', () => { w.toolOps.push('list'); return { value: [] } })
   on('prompt.compose', () => { w.compose++; return { sections: SECTIONS } })
-  on('prompt.submit', async (_$: any, e: any) => { if (w.submitGate) await w.submitGate; w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
+  on('prompt.submit', async (_$: any, e: any) => { if (w.submitGate) await w.submitGate; if (w.submitFails) throw new Error('session closed'); w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
   on('session.compact', (_$: any, e: any) => ({ messages: e.messages }))
   on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); w.claudeDuring?.(); if (w.claudeResult instanceof Error) throw w.claudeResult; return { result: w.claudeResult } })
   // The kit cannot mint a spawned agent's id (core sets it), so a success is driven in test/blocked.test.ts; this answers deny and throw.

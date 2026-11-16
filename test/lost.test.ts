@@ -1,4 +1,5 @@
 import { test, expect } from 'claude-code/testing'
+const OPTS = (o: Record<string, unknown>) => ({ options: o as any })
 import { CODEX_AHEAD, DATA, NOW, SID, agent, logLines, settleReal, startSession, world } from './harness'
 
 const entry = { t: NOW, session: SID, agentType: 'Explore', route: 'codex', reason: 'codex-ahead', claudeAfter: 1, codexAfter: 2, estimate: { fiveHour: 1, sevenDay: 1 }, mode: 'auto' }
@@ -181,7 +182,40 @@ test('dw42_a_codex_child_that_outlived_its_process_is_stopped_before_the_change_
   await started
   const kill = w.processCalls.findIndex((c: string[]) => c[0] === 'pkill')
   const status = w.processCalls.findIndex((c: string[]) => c[0] === 'git' && c[1] === 'status')
-  expect(w.processCalls[kill]).toEqual(['pkill', '-f', 'codex exec .*codex-123'])
-  expect(kill).toBeLessThan(status)
+  const pattern = 'codex exec .* -o .*/codex-123\\.last\\.txt( |$)'
+  expect(w.processCalls[kill]).toEqual(['pkill', '-f', pattern])
+  expect(w.processCalls[kill + 1]).toEqual(['pkill', '-KILL', '-f', pattern]) // one that ignored SIGTERM
+  expect(kill + 1).toBeLessThan(status)
+  expect(new RegExp(pattern).test('codex exec --json -o /d/runs/codex-123.last.txt -')).toBe(true)
+  expect(new RegExp(pattern).test('codex exec --json -o /Data Dir/runs/codex-123.last.txt -')).toBe(true)
+  expect(new RegExp(pattern).test('codex exec --json -o /d/runs/codex-456.last.txt continue the work of codex-123')).toBe(false)
   expect(lostSubmits(w)).toHaveLength(1)
+})
+
+test('dw41_a_background_result_that_cannot_be_delivered_keeps_its_record', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { submitFails: true } as any)
+  await $.tool.call(agent({ run_in_background: true }) as any)
+  await settleReal(() => w.spawnFinally > 0, 500)
+  await settleReal(() => false, 50)
+  expect(runKeys(w)).toHaveLength(1)
+})
+
+test('dw42_reconcile_does_not_redo_or_start_a_cooldown', async ($, on) => {
+  const w = world(on, { ...CODEX_AHEAD, 'run/codex-123': record() })
+  await startSession($)
+  expect(w.agentSpawns).toEqual([])
+  await $.tool.call(agent() as any)
+  expect(w.spawns).toHaveLength(1) // the next call still goes to Codex
+})
+
+test('dw43_another_sessions_record_is_kept_until_the_timeout_plus_five_minutes', OPTS({ taskTimeoutMinutes: 10 }), async ($, on) => {
+  const w = world(on, { 'run/codex-123': record({ sessionId: 'other', startedAt: NOW - 15 * 60_000 + 1000 }) })
+  await startSession($)
+  expect(w.store.has('run/codex-123')).toBe(true)
+})
+
+test('dw43_another_sessions_record_past_the_timeout_plus_five_minutes_is_cleared', OPTS({ taskTimeoutMinutes: 10 }), async ($, on) => {
+  const w = world(on, { 'run/codex-123': record({ sessionId: 'other', startedAt: NOW - 15 * 60_000 - 1000 }) })
+  await startSession($)
+  expect(w.store.has('run/codex-123')).toBe(false)
 })

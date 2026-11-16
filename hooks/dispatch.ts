@@ -173,10 +173,13 @@ async function lostRun($: EngineInterface, st: State, record: RunRecord, current
   await quietly(() => removeInflight($, record.agentId))
   await quietly(() => writeLog($, st, { ...record.entry, outcome: 'lost' }))
   // A reload kills the Codex child, but a killed Claude Code process leaves it running (seen live): stop it before the
-  // change check. The pattern matches only a codex exec whose -o file carries this agent id.
+  // change check. The pattern matches only a codex exec whose -o file is this run's, not a prompt naming its id.
   await quietly(async () => {
-    const r = await $.process.run(['pkill', '-f', `codex exec .*${record.agentId}`])
-    if (r.exitCode === 0) await $.clock.sleep(1000)
+    const pattern = `codex exec .* -o .*/${record.agentId}\\.last\\.txt( |$)`
+    const r = await $.process.run(['pkill', '-f', pattern])
+    if (r.exitCode !== 0) return
+    await $.clock.sleep(1000)
+    await $.process.run(['pkill', '-KILL', '-f', pattern]) // one that ignored SIGTERM
   })
   if (!current) return { agentId: record.agentId }
   let changed: string[] | null = []
@@ -534,10 +537,10 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const done = (async () => {
     try {
       await deliverBackground($, st, task, await runTask($, st, task, ac.signal, `${dd}/runs/${agentId}.full.txt`, true), outputFile)
-    } catch {
-      // a detached run has nobody to throw to
-    } finally {
       await quietly(() => $.store.delete(`run/${agentId}`))
+    } catch {
+      // A detached run has nobody to throw to. Its record stays, so the next module instance reports it lost.
+    } finally {
       st.runs.delete(agentId)
     }
   })()
