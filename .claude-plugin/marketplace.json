@@ -1,0 +1,5 @@
+{
+  "name": "balancer-local",
+  "owner": { "name": "Balancer" },
+  "plugins": [{ "name": "balancer", "source": "./" }]
+}

@@ -1,6 +1,6 @@
 {
   "name": "balancer",
-  "version": "0.1.0",
+  "version": "0.2.10",
   "description": "Shares delegated subagent work between Claude and the local Codex CLI so both subscriptions are used at a similar pace.",
   "author": {
     "name": "Balancer"
@@ -43,16 +43,34 @@
       "description": "Comma-separated subagent types that may run on Codex",
       "default": "general-purpose,claude,Explore"
     },
+    "excludedAgentTypes": {
+      "type": "string",
+      "title": "Excluded agent types",
+      "description": "Comma-separated subagent types that always stay on Claude, even in codex mode",
+      "default": "plan-reviewer"
+    },
+    "excludedModels": {
+      "type": "string",
+      "title": "Excluded models",
+      "description": "Comma-separated Claude models (alias such as fable, or a full id of that family) whose calls always stay on Claude, even in codex mode",
+      "default": "fable"
+    },
     "effortMap": {
       "type": "string",
       "title": "Effort map",
       "description": "Agent model to Codex reasoning effort, as model=effort pairs",
       "default": "haiku=low,sonnet=medium,opus=high,default=high"
     },
+    "modelMap": {
+      "type": "string",
+      "title": "Model map",
+      "description": "Agent model to Codex model, as model=model pairs",
+      "default": "opus=gpt-6.1-sol,sonnet=gpt-6.1-terra"
+    },
     "codexModel": {
       "type": "string",
       "title": "Codex model",
-      "description": "Override Codex's default model; empty keeps the default",
+      "description": "Codex model for unmapped Agent calls and /codex; empty keeps Codex's default",
       "default": ""
     },
     "maxConcurrentCodex": {
