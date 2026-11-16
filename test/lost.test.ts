@@ -64,7 +64,10 @@ test('dw41_codex_command_record_is_removed_after_its_text', async ($, on) => {
 
 test('dw41_foreground_record_is_removed_when_codex_fails_and_the_call_falls_back', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { script: 'fail' } as any)
+  let seen: string[] = []
+  w.during = () => { seen = runKeys(w) }
   await $.tool.call(agent() as any)
+  expect(seen).toHaveLength(1)
   expect(runKeys(w)).toEqual([])
 })
 
@@ -110,11 +113,13 @@ test('dw42_first_prompt_reconciles_when_session_start_did_not_and_carries_the_me
   expect(runKeys(w)).toEqual([])
 })
 
-test('dw42_a_slash_command_does_not_take_the_message', async ($, on) => {
+test('dw42_a_slash_command_does_not_take_the_message_the_next_typed_prompt_does', async ($, on) => {
   const w = world(on, { 'run/codex-123': record() })
   await $.prompt.submit({ text: '/balance', command: { name: 'balance', args: '' } } as any)
   expect(w.contexts[0]).toBeUndefined()
   expect(w.store.has('run/codex-123')).toBe(true)
+  await $.prompt.submit({ text: 'hello' } as any)
+  expect(w.contexts[1]?.join('\n')).toContain('ended without a result')
 })
 
 test('dw42_a_broken_record_does_not_stop_the_others', async ($, on) => {
