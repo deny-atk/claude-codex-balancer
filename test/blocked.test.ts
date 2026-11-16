@@ -314,3 +314,71 @@ test('dw37_option_default_and_parsing', () => {
   expect([...readOptions({}).excluded]).toEqual(['plan-reviewer'])
   expect([...readOptions({ excludedAgentTypes: ' a , b,,' }).excluded]).toEqual(['a', 'b'])
 })
+
+// ---------- dw40: excluded models ----------
+
+test('dw40_model_matching_alias_and_full_id_forms', () => {
+  const set = new Set(['fable'])
+  const cases: [string | undefined, boolean][] = [
+    ['fable', true], ['Fable', true], ['claude-fable-5-2', true], ['claude-fable-5-2[1m]', true], ['us.anthropic.claude-fable-5-2', true],
+    ['claude-fable', true], ['sonnet', false], ['claude-sonnet-5-5', false], ['fabled', false], ['claude-fabled-1', false], [undefined, false],
+  ]
+  for (const [m, want] of cases) expect([m, codex.modelExcluded(m, set)]).toEqual([m, want])
+  expect(codex.modelExcluded('fable', new Set())).toBe(false)
+})
+
+const GP_DEF_FILE = '/proj/.claude/agents/deep-thinker.md'
+const fableDef = (model: string) => `---\nname: deep-thinker\nmodel: ${model}\ntools: Read, Edit\n---\nBODY\n`
+
+for (const mode of ['auto', 'codex']) {
+  test(`dw40_a_call_setting_fable_stays_on_claude_in_${mode}_mode`, EXCL({ mode }), async ($, on) => {
+    const w = world(on, CODEX_AHEAD)
+    const input = agent({ subagent_type: 'general-purpose', model: 'fable' }) as any
+    const r: any = await $.tool.call(input)
+    expect(r.result).toEqual({ status: 'claude-ran' })
+    expect(w.spawns).toHaveLength(0)
+    expect(w.agentCalls[0]).toEqual({ ...input, tool_use_id: w.agentCalls[0].tool_use_id })
+    expect(logLines(w)).toHaveLength(1)
+    expect(logLines(w)[0]).toMatchObject({ route: 'claude', reason: 'model-excluded', agentType: 'general-purpose' })
+  })
+}
+
+test('dw40_an_agent_file_model_of_fable_counts_when_the_call_sets_none', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(GP_DEF_FILE, fableDef('claude-fable-5-2'))
+  await $.tool.call(agent({ subagent_type: 'deep-thinker' }) as any)
+  expect(w.spawns).toHaveLength(0)
+  expect(logLines(w)[0]).toMatchObject({ route: 'claude', reason: 'model-excluded', agentType: 'deep-thinker' })
+})
+
+test('dw40_the_calls_own_model_wins_over_the_agent_file', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(GP_DEF_FILE, fableDef('fable'))
+  await $.tool.call(agent({ subagent_type: 'deep-thinker', model: 'sonnet' }) as any)
+  expect(w.spawns).toHaveLength(1)
+  expect(logLines(w)[0]).toMatchObject({ route: 'codex', reason: 'codex-ahead' })
+})
+
+test('dw40_an_excluded_type_keeps_agent_excluded_and_claude_mode_keeps_mode_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.files.set(PLAN_FILE, PLAN_DEF)
+  await $.tool.call(agent({ subagent_type: 'plan-reviewer', model: 'fable' }) as any)
+  expect(logLines(w)[0]!.reason).toBe('agent-excluded')
+})
+
+test('dw40_claude_mode_keeps_mode_claude', EXCL({ mode: 'claude' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  await $.tool.call(agent({ subagent_type: 'general-purpose', model: 'fable' }) as any)
+  expect(logLines(w)[0]!.reason).toBe('mode-claude')
+})
+
+test('dw40_an_empty_option_lets_fable_route_normally', EXCL({ excludedModels: '' }), async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  await $.tool.call(agent({ subagent_type: 'general-purpose', model: 'fable' }) as any)
+  expect(w.spawns).toHaveLength(1)
+})
+
+test('dw40_option_default_and_parsing', () => {
+  expect([...readOptions({}).excludedModels]).toEqual(['fable'])
+  expect([...readOptions({ excludedModels: ' Fable , opus,,' }).excludedModels]).toEqual(['fable', 'opus'])
+})

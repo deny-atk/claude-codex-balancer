@@ -9,7 +9,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  codexModelFor, effortFor, gitSnapshot, grantsFor, parseGitRoots, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
+  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, parseGitRoots, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate } from './policy'
@@ -49,6 +49,7 @@ export function readOptions(o: PluginOptions) {
     } as PolicyConfig,
     eligible: new Set(str(o, 'eligibleAgentTypes', 'general-purpose,claude,Explore').split(',').map(s => s.trim()).filter(Boolean)),
     excluded: new Set(str(o, 'excludedAgentTypes', 'plan-reviewer').split(',').map(s => s.trim()).filter(Boolean)),
+    excludedModels: new Set(str(o, 'excludedModels', 'fable').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)),
     effortMap: parseEffortMap(str(o, 'effortMap', 'haiku=low,sonnet=medium,opus=high,default=high')),
     modelMap: parseEffortMap(str(o, 'modelMap', 'opus=gpt-6.1-sol,sonnet=gpt-6.1-terra')),
     codexModel: str(o, 'codexModel', ''),
@@ -345,6 +346,7 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
   const ok = await eligible($, st, e)
   if (!ok) return next(e)
   const def = ok.def // read once: eligibility and the task share it
+  const model = e.model ?? defModel(def) // the call's own model wins over its agent file's, as for the model map
 
   const type = e.subagent_type ?? 'general-purpose'
   const sessionId = await $.session.id()
@@ -370,10 +372,12 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
       reserved, claudeReserved, inflight: list.length, codexAvailable: usable,
     }
     let d: Decision
-    const excluded = mode !== 'claude' && st.opts.excluded.has(type)
+    const excluded = mode === 'claude' ? undefined
+      : st.opts.excluded.has(type) ? 'agent-excluded' as const
+      : modelExcluded(model, st.opts.excludedModels) ? 'model-excluded' as const : undefined
     if (excluded || (mode === 'auto' && now < st.cooldownUntil)) {
       d = {
-        route: 'claude', reason: excluded ? 'agent-excluded' : 'codex-cooldown', refresh: false,
+        route: 'claude', reason: excluded ?? 'codex-cooldown', refresh: false,
         claudeAfter: score(claude, now, { fiveHour: st.opts.claudeCost.fiveHour + claudeReserved.fiveHour, sevenDay: st.opts.claudeCost.sevenDay + claudeReserved.sevenDay }),
         codexAfter: score(codex, now, { fiveHour: reserved.fiveHour + estimate.fiveHour, sevenDay: reserved.sevenDay + estimate.sevenDay }),
       }
@@ -403,7 +407,6 @@ export async function onAgent($: EngineInterface, st: State, e: AgentCall, next:
 
   const agentId = picked.agentId
   const sandbox = sandboxFor(e.subagent_type, planMode, def?.tools)
-  const model = e.model ?? defModel(def)
   const task: Task = {
     agentId, sessionId, type, description: e.description, prompt: e.prompt, rowId: e.tool_use_id,
     cwd, sandbox, effort: (def && codexEffort(def)) ?? effortFor(model, st.opts.effortMap),

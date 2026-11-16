@@ -43,6 +43,16 @@ export function effortFor(model: string | undefined, map: Record<string, string>
   return (model !== undefined ? map[model] : undefined) ?? map.default ?? 'high'
 }
 
+/** An alias (`fable`, any case) or a Claude full id of that family (`claude-fable-5-2`, with a `[1m]` suffix or a provider prefix). */
+export function modelExcluded(model: string | undefined, excluded: ReadonlySet<string>): boolean {
+  if (model === undefined) return false
+  const m = model.toLowerCase()
+  for (const x of excluded) {
+    if (m === x || new RegExp(`(^|[./])claude-${x.replace(/[^a-z0-9]/g, '\\$&')}(-|\\[|$)`).test(m)) return true
+  }
+  return false
+}
+
 export function codexModelFor(model: string | undefined, map: Record<string, string>, codexModel: string): string | undefined {
   return model !== undefined && Object.prototype.hasOwnProperty.call(map, model) ? map[model] : codexModel || undefined
 }
