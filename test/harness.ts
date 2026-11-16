@@ -69,6 +69,9 @@ export type World = {
   failStoreWrites: boolean
   statuses: (string | undefined)[] // every $.ui.status call, in order
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
+  submitFails?: boolean // a prompt.submit reaching the bottom throws
+  pkillFinds?: boolean // `pkill` reports that it signalled a process
+  submitGate?: Promise<void> // a prompt.submit reaching the bottom waits for this: the prompt has not entered yet
   state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
   modelCalls: string[] // model.complete / classify / fork that reached the bottom: the mod must make none
   toolOps: string[] // tool.register / tool.list that reached the bottom
@@ -176,6 +179,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
       const out = w.git.length > 1 ? w.git.shift()! : w.git[0]!
       return { value: { exitCode: out === null ? 128 : 0, stdout: out ?? '', stderr: '' } }
     }
+    if (a === 'pkill') return { value: { exitCode: w.pkillFinds ? 0 : 1, stdout: '', stderr: '' } }
     if (a === 'tail') return { value: { exitCode: w.rollout === null ? 1 : 0, stdout: w.rollout ?? '', stderr: '' } }
     if (a === 'sh') return { value: { exitCode: 1, stdout: '', stderr: '' } } // app server: no answer
     throw new Error('unexpected process.run ' + String(a))
@@ -216,7 +220,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('tool.register', (_$: any, e: any) => { w.toolOps.push(`register ${e.name}`); return { value: { name: e.name } } })
   on('tool.list', () => { w.toolOps.push('list'); return { value: [] } })
   on('prompt.compose', () => { w.compose++; return { sections: SECTIONS } })
-  on('prompt.submit', (_$: any, e: any) => { w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
+  on('prompt.submit', async (_$: any, e: any) => { if (w.submitGate) await w.submitGate; if (w.submitFails) throw new Error('session closed'); w.submits.push(e.text); w.contexts.push(e.context); return { text: e.text, ...(e.context ? { context: e.context } : {}) } })
   on('session.compact', (_$: any, e: any) => ({ messages: e.messages }))
   on('tool.call', { tool: 'Agent' }, (_$: any, e: any) => { w.agentCalls.push(e); w.claudeDuring?.(); if (w.claudeResult instanceof Error) throw w.claudeResult; return { result: w.claudeResult } })
   // The kit cannot mint a spawned agent's id (core sets it), so a success is driven in test/blocked.test.ts; this answers deny and throw.

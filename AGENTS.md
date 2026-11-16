@@ -37,3 +37,39 @@ claude plugin test .
 
 Task notes (spike results, decisions, check results) live in the untracked
 `notes/` folder.
+
+## Installing and live testing
+
+Every install or update of a plugin reloads plugins in all open sessions
+(sessions in the background apply it later). A reload kills Balancer's
+in-flight Codex runs, so installs are rare and deliberate:
+
+- The installed copy comes from a separate clean checkout of `main`, outside
+  this working folder, never from a branch or a working tree. The local
+  marketplace points at that checkout.
+- Update it only after a merge, and only when no Codex run is in flight in
+  any session. The plugin's store file under `~/.claude/plugins/store/` has no
+  `inflight/` or `run/` keys then, and `pgrep -f "codex exec"` finds nothing.
+- Update steps:
+
+  ```
+  git -C <clean checkout> pull --ff-only
+  claude plugin marketplace update <marketplace>
+  claude plugin update balancer@<marketplace>
+  ```
+
+  An update to the same version changes nothing and reloads nothing. A version
+  already in the plugin cache is reused as it stands, so every merge that
+  changes the plugin bumps its version.
+
+Branch builds are tested with `claude plugin test` and, live, only in
+headless sessions:
+
+- Copy the working tree outside the repository. A copy inside it is picked up
+  by `claude plugin test`.
+- Load the copy with `--plugin-dir <copy>` and a `--settings` file that sets
+  `enabledPlugins` `"balancer@<marketplace>": false`.
+- Such a session does not reload the folder when files change, and it reloads
+  no other session.
+- It shares the data folder, and so the decision log, with the installed copy.
+- It has a store of its own, so set `mode` `codex` when a run must go to Codex.
