@@ -120,6 +120,8 @@ export function createState(options: PluginOptions) {
     cache: createReadingCache(),
     exclusive: serial(),
     logQueue: serial(),
+    measureQueue: serial(), // apart from `exclusive`: a measurement never waits on a routing decision
+    completedEarly: new Set<string>(), // agent ids whose turn.complete came before their reservation was mapped (at most 100)
     recent: [] as DecisionEntry[],
     runs: new Map<string, { ac: AbortController; sessionId: string; description: string; done: Promise<void> }>(),
     claudeReservations: new Map<string, string>(),
@@ -151,7 +153,7 @@ export async function pruneRuns($: EngineInterface, st: State): Promise<void> {
     const dir = `${await dataDir($, st)}/runs`
     const now = await $.clock.now()
     const paths = (await $.fs.list(dir))
-      .filter(e => e.kind === 'file' && /^codex-[0-9a-f-]+\.(txt|last\.txt|full\.txt|partial\.txt|patch)$/.test(e.name) && now - e.mtimeMs > RUN_FILE_MAX_AGE_MS)
+      .filter(e => e.kind === 'file' && !e.isLink && /^codex-[0-9a-f-]+\.(txt|last\.txt|full\.txt|partial\.txt|patch)$/.test(e.name) && now - e.mtimeMs > RUN_FILE_MAX_AGE_MS)
       .map(e => `${dir}/${e.name}`)
     if (paths.length) await $.process.run(['rm', '-f', '--', ...paths])
   } catch { /* Missing directories and cleanup failures do not prevent startup. */ }
@@ -333,8 +335,11 @@ async function eligible($: EngineInterface, st: State, e: AgentCall): Promise<{ 
   } catch {
     return null
   }
-  if (type === undefined || st.opts.eligible.has(type)) return {}
-  const def = await agentDefFor($, type, cwd)
+  if (type?.includes(':')) return null // a plugin agent: its definition lives elsewhere and cannot be checked
+  const listed = type === undefined || st.opts.eligible.has(type)
+  if (listed && type === undefined) return {}
+  const def = await agentDefFor($, type!, cwd)
+  if (listed) return def && unavailableTools(def) ? null : {}
   return def && !unavailableTools(def) ? { def } : null
 }
 
@@ -617,7 +622,7 @@ async function deliverBackground($: EngineInterface, st: State, c: Task, s: Sett
   if (s.kind === 'aborted') return
   let text: string
   if (s.kind === 'ok') {
-    await $.fs.write(outputFile, s.report)
+    await quietly(() => $.fs.write(outputFile, s.report)) // the message below is the report's delivery
     text = `[balancer] Background agent "${c.description}" (${c.agentId}) finished on Codex.\n\n${s.report}`
   } else if (s.reason === 'blocked' && (s.sandbox === 'read-only' || (s.changed !== null && s.changed.length === 0))) {
     // Nothing was changed, so the task is redone once on Claude: no cooldown, since Codex itself worked.
@@ -665,8 +670,9 @@ async function startRedo($: EngineInterface, st: State, c: Task, notes: string |
     })
     const deny = (r as { deny?: string }).deny
     if (deny !== undefined || !r.agentId) throw new Error(deny ?? 'no agent id')
-    st.claudeAgents.set(r.agentId, reservation)
+    const mapped = mapAgent(st, r.agentId, reservation)
     agentId = r.agentId
+    if (!mapped) await quietly(() => releaseClaude($, st, reservation))
   } catch (err) {
     await quietly(() => releaseClaude($, st, reservation))
     return { failed: String((err as { message?: unknown })?.message ?? err).slice(0, 200) }
@@ -720,13 +726,19 @@ async function nextOnClaude(
     const result = await next(e)
     const value = 'result' in result ? result.result : undefined
     if (st.claudeReservations.has(reservation) && value && typeof value === 'object' && 'status' in value && value.status === 'async_launched' && 'agentId' in value && typeof value.agentId === 'string') {
-      st.claudeAgents.set(value.agentId, reservation)
-      background = true
+      background = mapAgent(st, value.agentId, reservation)
     }
     return result
   } finally {
     if (!background) await quietly(() => releaseClaude($, st, reservation)) // a store error must not replace the call's result
   }
+}
+
+/** Maps a launched agent to its reservation. False when its turn.complete already came: the caller releases at once. */
+function mapAgent(st: State, agentId: string, reservation: string): boolean {
+  if (st.completedEarly.delete(agentId)) return false
+  st.claudeAgents.set(agentId, reservation)
+  return true
 }
 
 async function releaseClaude($: EngineInterface, st: State, id: string): Promise<void> {
@@ -737,6 +749,10 @@ async function releaseClaude($: EngineInterface, st: State, id: string): Promise
 
 export async function onTurnComplete($: EngineInterface, st: State, e: TurnCompleteInput, next: Next<'turn.complete'>) {
   const id = e.agentId === undefined ? undefined : st.claudeAgents.get(e.agentId)
+  if (e.agentId !== undefined && !id) {
+    st.completedEarly.add(e.agentId)
+    if (st.completedEarly.size > 100) st.completedEarly.delete(st.completedEarly.values().next().value!)
+  }
   if (id) await quietly(() => releaseClaude($, st, id))
   return next(e)
 }
@@ -749,9 +765,13 @@ export async function onMeasure($: EngineInterface, st: State, e: SessionMeasure
   }
   const now = await $.clock.now()
   const live = claudeFromUsage(e.rateLimits, now)
-  const stored = await loadReading($, 'claude')
-  const merged = live ? (mergeClaude(stored, live, now) ?? live) : mergeClaude(stored, null, now)
-  if (live) await saveReading($, 'claude', merged ?? live)
+  // read, merge and write as one step: a lower reading that read the old value must not land after a higher one
+  const merged = await st.measureQueue(async () => {
+    const stored = await loadReading($, 'claude')
+    const m = live ? (mergeClaude(stored, live, now) ?? live) : mergeClaude(stored, null, now)
+    if (live) await saveReading($, 'claude', m ?? live)
+    return m
+  })
   await observe($, st, merged)
 }
 

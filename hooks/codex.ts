@@ -310,7 +310,13 @@ export async function gitSnapshot($: $, cwd: string): Promise<string[] | null> {
       let all: string[] | null = null
       try { all = await hash(live) } catch { /* retried one at a time */ }
       if (all) live.forEach((p, i) => hashes.set(p, all[i]!))
-      else for (const p of live) hashes.set(p, (await hash([p]).catch(() => null))?.[0] ?? 'missing')
+      else {
+        for (const p of live) {
+          const one = (await hash([p]).catch(() => null))?.[0]
+          if (one === undefined) return null // listed, not deleted, yet unreadable (a dirty submodule): unknown, never equal to a deletion
+          hashes.set(p, one)
+        }
+      }
     }
     return [...new Map(entries.map(e => [e.path, `${e.path}\t${hashes.get(e.path) ?? 'missing'}`])).values()]
   } catch { return null }

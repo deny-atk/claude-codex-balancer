@@ -63,6 +63,9 @@ export type World = {
   usage: { kind: string; percentUsed: number; resetsAt?: string }[]
   loginChecks: number
   failWrites: boolean
+  failWriteRe?: RegExp // fs.write throws for a path this matches
+  hashFail: Set<string> // `git hash-object` exits non-zero when asked about one of these paths
+  holdSecondRead?: { key: string; seen: number; gate: Promise<void> } // store.get of `key`: the second read returns what it saw, after the gate
   failStoreWrites: boolean
   statuses: (string | undefined)[] // every $.ui.status call, in order
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
@@ -107,7 +110,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], agentSpawns: [], stopCalls: [],
     claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(),
     gate: undefined as any, openGate: () => {},
-    git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false, failStoreWrites: false,
+    git: [''], rollout: null, usage: [], loginChecks: 0, failWrites: false, hashFail: new Set(), failStoreWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
   }
   w.gate = new Promise<void>(r => { w.openGate = r })
@@ -119,7 +122,12 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('session.id', () => ({ value: SID }))
   on('session.usage', () => ({ value: { rateLimits: w.usage } }))
 
-  on('store.get', (_$: any, e: any) => ({ value: w.store.get(e.key) }))
+  on('store.get', async (_$: any, e: any) => {
+    const value = w.store.get(e.key)
+    const h = w.holdSecondRead
+    if (h && h.key === e.key && ++h.seen === 2) await h.gate
+    return { value }
+  })
   on('store.set', (_$: any, e: any) => { if (w.failStoreWrites) throw new Error('store failed'); w.store.set(e.key, e.value); return { value: undefined } })
   on('store.delete', (_$: any, e: any) => { w.store.delete(e.key); return { value: undefined } })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
@@ -135,7 +143,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     if (t === undefined) throw new Error('ENOENT')
     return { value: t }
   })
-  on('fs.write', (_$: any, e: any) => { if (w.failWrites) throw new Error('disk full'); w.files.set(e.path, e.text); w.writes.push(e.path); return { value: undefined } })
+  on('fs.write', (_$: any, e: any) => { if (w.failWrites || w.failWriteRe?.test(e.path)) throw new Error('disk full'); w.files.set(e.path, e.text); w.writes.push(e.path); return { value: undefined } })
   on('fs.list', (_$: any, e: any) => {
     if (e.path === `${DATA}/runs` && w.runEntries) return { value: w.runEntries }
     const day = rolloutDayDirs(HOME, NOW)
@@ -161,6 +169,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     if (a === 'git' && b === 'diff') return { value: { exitCode: 0, stdout: w.diff, stderr: '' } }
     if (a === 'git' && b === 'hash-object') {
       const paths = (e.argv as string[]).slice((e.argv as string[]).indexOf('--') + 1)
+      if (paths.some(p => w.hashFail.has(p))) return { value: { exitCode: 128, stdout: '', stderr: 'fatal' } }
       return { value: { exitCode: 0, stdout: paths.map(p => 'h:' + (w.work.get(p) ?? '')).join('\n') + '\n', stderr: '' } }
     }
     if (a === 'git') {

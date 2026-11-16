@@ -62,6 +62,23 @@ test('dw27_prunes_only_old_matching_regular_run_files', async ($, on) => {
   expect(w.processCalls.filter(c => c[0] === 'rm')).toEqual([['rm', '-f', '--', `${DATA}/runs/codex-ab-12.last.txt`]])
 })
 
+test('dw27_a_symlink_is_not_removed', async ($, on) => {
+  const w = world(on, {}, { runEntries: [{ name: 'codex-ab.last.txt', kind: 'file', mtimeMs: NOW - 8 * D, size: 1, isLink: true }] })
+  await startSession($)
+  expect(w.processCalls.filter(c => c[0] === 'rm')).toEqual([])
+})
+
+test('dw27_every_matching_run_file_suffix_is_pruned_when_old', async ($, on) => {
+  const entry = (name: string, age: number, isLink = false) => ({ name, kind: 'file', mtimeMs: NOW - age, size: 1, isLink })
+  const w = world(on, {}, { runEntries: [
+    entry('codex-ab.partial.txt', 8 * D), entry('codex-ab.patch', 8 * D), entry('codex-ab.full.txt', 8 * D), entry('codex-cd.patch', D),
+  ] })
+  await startSession($)
+  const rm = w.processCalls.filter(c => c[0] === 'rm')
+  expect(rm).toHaveLength(1)
+  expect(rm[0]!.slice(3).sort()).toEqual([`${DATA}/runs/codex-ab.full.txt`, `${DATA}/runs/codex-ab.partial.txt`, `${DATA}/runs/codex-ab.patch`])
+})
+
 for (const fallback of ['', 'gpt-command']) {
   test(`dw2_codex_command_uses_only_codex_model_${fallback || 'empty'}`, OPTS({ codexModel: fallback, modelMap: 'default=gpt-mapped' }), async ($, on) => {
     const w = world(on, CODEX_AHEAD)

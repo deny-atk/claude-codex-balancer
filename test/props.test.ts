@@ -6,10 +6,11 @@ import { appendCapped, pushRecent, lastDecisions } from '../hooks/balance'
 import type { DecisionEntry } from '../hooks/balance'
 import { createEventParser } from '../hooks/codex'
 import * as codex from '../hooks/codex'
-import { listInflight, parseCodexRolloutTail, mergeUsage } from '../hooks/readings'
+import { listInflight, parseCodexRolloutTail, parseAppServerOutput, mergeUsage } from '../hooks/readings'
+import type { WindowReading } from '../hooks/policy'
 import { reading } from './harness'
 import { parseAgentDef, unavailableTools } from '../hooks/agentdef'
-import { MARKER, cutRecord, lines, rl, tokenCount } from './fixtures/rollout'
+import { MARKER, appServerOut, cutRecord, lines, rl, tokenCount } from './fixtures/rollout'
 
 const CASES = 400
 function mulberry32(seed: number) {
@@ -25,7 +26,7 @@ function mulberry32(seed: number) {
 type Rng = () => number
 const pick = <T,>(r: Rng, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)] as T
 const int = (r: Rng, lo: number, hi: number) => lo + Math.floor(r() * (hi - lo + 1))
-const forAll = (seed: number, body: (r: Rng, i: number) => void) => { const r = mulberry32(seed); for (let i = 0; i < CASES; i++) body(r, i) }
+const forAll = (seed: number, body: (r: Rng, i: number) => void, n = CASES) => { const r = mulberry32(seed); for (let i = 0; i < n; i++) body(r, i) }
 
 const TEXTS = ['pong', 'a {"b": 1} c', 'line\nbreak', 'é漢字🙂', '', 'You hit your usage limit', 'boom', '\\"quoted\\"']
 
@@ -282,4 +283,93 @@ test('prop_push_recent_equals_the_suffix_of_an_unbounded_list', () => {
       expect(list).toEqual(ref.slice(-max))
     }
   })
+})
+
+// ---------- second round: change check, readings, agent files, window merge (200 cases each, fixed seeds) ----------
+
+const shuffled = <T,>(r: Rng, xs: readonly T[]): T[] => {
+  const a = [...xs]
+  for (let i = a.length - 1; i > 0; i--) { const j = int(r, 0, i); [a[i], a[j]] = [a[j]!, a[i]!] }
+  return a
+}
+
+test('prop_dw5_changed_since_is_exactly_the_paths_whose_presence_or_fingerprint_differs', () => {
+  forAll(401, r => {
+    const paths = Array.from(new Set(Array.from({ length: int(r, 0, 12) }, () => `d${int(r, 0, 3)}/f${int(r, 0, 9)}${pick(r, ['', '\tx'])}`)))
+    const side = () => new Map(paths.filter(() => r() < 0.7).map(p => [p, pick(r, ['h1', 'h2', 'missing'])] as const))
+    const before = side()
+    const after = side()
+    const text = (m: Map<string, string>) => shuffled(r, [...m].map(([p, f]) => `${p}\t${f}`))
+    const expected = paths.filter(p => before.get(p) !== after.get(p)).sort()
+    expect(codex.changedSince(text(before), text(after))!.sort()).toEqual(expected)
+    expect(codex.changedSince(null, text(after))).toBeNull()
+    expect(codex.changedSince(text(before), null)).toBeNull()
+  }, 200)
+})
+
+test('prop_dw5_rollout_and_app_server_windows_give_the_same_reading', () => {
+  forAll(402, r => {
+    // Both shapes carry the reset in epoch seconds only; neither takes milliseconds.
+    const mk = (mins: number) => r() < 0.2 ? null : { used: int(r, -40, 160), mins, resets: r() < 0.2 ? undefined : int(r, 1_700_000_000, 1_800_000_000) }
+    const wins = shuffled(r, [mk(300), mk(10080)])
+    const rollout = (w: ReturnType<typeof mk>) => w && { used_percent: w.used, window_minutes: w.mins, ...(w.resets !== undefined ? { resets_at: w.resets } : {}) }
+    const app = (w: ReturnType<typeof mk>) => w && { usedPercent: w.used, windowDurationMins: w.mins, ...(w.resets !== undefined ? { resetsAt: w.resets } : {}) }
+    const reached = r() < 0.3 ? 'primary' : null
+    const a = parseCodexRolloutTail(lines(cutRecord, tokenCount(rl(rollout(wins[0]!), rollout(wins[1]!), reached))), 5)
+    const b = parseAppServerOutput(appServerOut({ primary: app(wins[0]!), secondary: app(wins[1]!), rateLimitReachedType: reached }), 5)
+    expect(a).toEqual(b)
+    const want = (mins: number): WindowReading | null => {
+      const w = wins.find(x => x?.mins === mins)
+      return w ? { used: Math.min(100, Math.max(0, w.used)), resetsAt: w.resets === undefined ? null : w.resets * 1000, lengthMs: mins * 60_000 } : null
+    }
+    expect(a).toEqual({ fiveHour: want(300), sevenDay: want(10080), readAt: 5, limitReached: reached !== null })
+  }, 200)
+})
+
+test('prop_dw18_agent_file_round_trips_model_effort_tools_and_trimmed_body', () => {
+  // Not covered, by design of the parser: CR-only line ends, a dash list at column 0, a comma inside one quoted tool,
+  // and an unbracketed inline list whose first and last items share a quote (`tools: "A", "B"` loses both outer quotes wrongly).
+  forAll(403, r => {
+    const word = () => pick(r, ['opus', 'sonnet', 'haiku', 'inherit', 'high', 'low', 'max', 'x-1'])
+    const quote = (v: string) => pick(r, [v, `"${v}"`, `'${v}'`])
+    const model = r() < 0.7 ? word() : undefined
+    const effort = r() < 0.7 ? word() : undefined
+    const tools = r() < 0.7 ? Array.from({ length: int(r, 1, 4) }, () => pick(r, ['Read', 'Grep', 'Edit', 'Bash(git:*)', 'Task'])) : undefined
+    const body = Array.from({ length: int(r, 1, 4) }, () => pick(r, ['Do the work.', '  indented', 'é漢 text', 'a: b', 'x -- y'])).join('\n')
+    const fm = [
+      'name: t',
+      ...(model !== undefined ? [`model: ${quote(model)}`] : []),
+      ...(effort !== undefined ? [`effort: ${quote(effort)}`] : []),
+      ...(tools ? [pick(r, [0, 1, 2]) === 0 ? `tools: ${tools.join(', ')}` : pick(r, [0, 1]) === 0 ? `tools: [${tools.map(quote).join(', ')}]` : `tools:\n${tools.map(t => `  - ${quote(t)}`).join('\n')}`] : []),
+    ]
+    const eol = pick(r, ['\n', '\r\n'])
+    const text = pick(r, ['', '\ufeff']) + `---${eol}${fm.join('\n').replace(/\n/g, eol)}${eol}---${eol}${'\n\n'.slice(0, int(r, 0, 2)).replace(/\n/g, eol)}${body.replace(/\n/g, eol)}${eol}`
+    const def = parseAgentDef(text)
+    expect(def).not.toBeNull()
+    expect(def!.model).toBe(model)
+    expect(def!.effort).toBe(effort)
+    expect(def!.tools).toEqual(tools)
+    expect(def!.body).toBe(body.trim())
+  }, 200)
+})
+
+test('prop_dw25_merge_window_keeps_the_higher_use_in_one_window_and_the_later_window_across_windows', () => {
+  const LEN = 5 * 3_600_000
+  forAll(404, r => {
+    const win = (resetsAt: number | null): WindowReading | null => r() < 0.15 ? null : { used: int(r, 0, 100), resetsAt, lengthMs: LEN }
+    const base = 1_790_000_000_000
+    const ra = r() < 0.15 ? null : base
+    // offsets around the half-window boundary: strictly inside is one window, exactly half or more is another
+    const offset = pick(r, [0, 1, LEN / 2 - 1, LEN / 2, LEN / 2 + 1, LEN, 3 * LEN]) * pick(r, [-1, 1])
+    const rb = r() < 0.15 ? null : base + offset
+    const a = win(ra)
+    const b = win(rb)
+    const out = mergeUsage({ fiveHour: a, sevenDay: null, readAt: 1, limitReached: false }, { fiveHour: b, sevenDay: null, readAt: 2, limitReached: false })!.fiveHour
+    if (!a || !b) expect(out).toBe(a ?? b)
+    else if (a.resetsAt === null && b.resetsAt === null) expect([a, b]).toContain(out!)
+    else if (a.resetsAt === null) expect(out).toBe(b)
+    else if (b.resetsAt === null) expect(out).toBe(a)
+    else if (Math.abs(a.resetsAt - b.resetsAt) < LEN / 2) expect(out!.used).toBe(Math.max(a.used, b.used))
+    else expect(out!.resetsAt).toBe(Math.max(a.resetsAt, b.resetsAt))
+  }, 200)
 })

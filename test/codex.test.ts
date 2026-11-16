@@ -349,7 +349,7 @@ test('dw5_git_decodes_c_quoted_paths_and_compares_dirty_files', async () => {
   expect(changedSince([], await gitSnapshot(renamed, '/w'))).toEqual(['new -> café.txt'])
 })
 
-test('dw5_gitSnapshot with nothing listed runs no hash and a failed hash marks the path missing', async () => {
+test('dw5_gitSnapshot with nothing listed runs no hash and a path that cannot be hashed makes the snapshot unknown', async () => {
   const runs: string[][] = []
   const $ = fake$(undefined, async (argv) => {
     runs.push([...argv])
@@ -359,7 +359,7 @@ test('dw5_gitSnapshot with nothing listed runs no hash and a failed hash marks t
   })
   expect(await gitSnapshot($, '/w')).toEqual([])
   expect(runs).toHaveLength(1)
-  expect(await gitSnapshot($, '/w')).toEqual(['ok.py\tHH', 'dir\tmissing']) // batch failed, then one path at a time
+  expect(await gitSnapshot($, '/w')).toBeNull() // batch failed, then one path at a time, and `dir` still failed: unknown, not deleted
 })
 
 test('dw5_changedSince reports new, edited and vanished paths as plain paths', () => {

@@ -10,7 +10,7 @@ Balancer only moves delegated work: a call to the Agent tool. The main conversat
 
 An Agent call can run on Codex only if all of these hold. Otherwise it reaches Claude Code unchanged, with its input untouched.
 
-- `subagent_type` is omitted or is in `eligibleAgentTypes` (default `general-purpose`, `claude`, `Explore`), or it is a custom type whose definition file is found (below).
+- `subagent_type` is omitted or is in `eligibleAgentTypes` (default `general-purpose`, `claude`, `Explore`), or it is a custom type whose definition file is found (below). A type with a `:` in it (a plugin agent) is never eligible, even when listed. A listed type that has an agent file stays on Claude when that file's `tools` names something Codex cannot provide (below); a listed type with no file is eligible as before.
 - It is not a fork, has no `isolation` (worktree or remote) and has no `name` (a named agent can be continued with `SendMessage`, which Codex runs cannot).
 - The brief does not match `/\bmcp__|\bSkill\b|\bSendMessage\b|\bAskUserQuestion\b|\bArtifact\b/`, which marks work that needs Claude-only capabilities.
 - The project has not opted out (see Configuration).
@@ -88,6 +88,7 @@ Everything fails safe toward Claude. Before answering a call, Balancer checks th
 | Run ends saying it is blocked, files changed | Same text as the next row, reason `blocked`. No redo. | Delivered as a message. No redo, no cooldown. |
 | Run fails or times out, `workspace-write`, files changed | Result says Codex stopped part-way, lists the changed files, saves a patch and partial notes (see below) and says not to re-run from the top. Claude does not re-run it. | The same text is delivered as a message. No cooldown. |
 | Run fails, `workspace-write`, git cannot say what changed (not a repository) | Result says Codex could not run and the check was impossible. No re-run. | Delivered as a message. No cooldown. |
+| Run fails or times out, `workspace-write`, and a path git lists (not a deleted one) cannot be hashed, for example a dirty submodule folder | The change check is unknown, as when git cannot say: result says Codex could not run and the check was impossible. No re-run on Claude, because the changes were never inspected. | Delivered as a message. No cooldown. |
 | Codex reports a usage limit | Codex is marked limited until the earliest known reset, then as the rows above. | Same. |
 | Claude turn fails with a `rate_limit` error | Claude is marked limited until its earliest known reset (one 5-hour window when none is known), so Codex takes tasks while usable. | Same. |
 | Balancer's own hook throws | The engine skips the hook and Claude runs the subagent. There is no catch that denies. | Same. |
@@ -236,6 +237,7 @@ Tests are `test/*.test.ts(x)`, with the Done-when number in the name (`dw3_...`)
 
 ## Current limitations
 
+- Changes inside granted extra folders (`writable-dirs.json`) are not tracked by the change check, which asks git about the repository only. Those folders are meant for tool caches.
 - Codex's sandbox denies process listing (for example `pgrep`) even with extra writable folders, so a brief that needs it is blocked on Codex.
 - Plan mode is seen at the next prompt: a hook cannot read the session mode, so a mode changed mid-turn is missed until the next prompt, or an Agent `mode` argument.
 - The decision log is read and rewritten on each write, so concurrent sessions may lose a line.

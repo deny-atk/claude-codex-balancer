@@ -137,7 +137,7 @@ const launch = async ($: any, w: any, over: Record<string, unknown> = {}) => {
 
 // The kit cannot return a spawned agent's id (core sets it), and its `$` has no engine ops to call the hooks with, so a
 // successful spawn is driven by calling the hooks directly over a small hand-made `$` (as dw6 in register.test.ts does).
-const driven = () => {
+const driven = (completeAtSpawn = false) => {
   const store = new Map<string, unknown>(Object.entries(CODEX_AHEAD))
   const files = new Map<string, string>()
   const toasts: string[] = []
@@ -169,7 +169,7 @@ const driven = () => {
     ui: { status: async () => {}, toast: async (t: string) => void toasts.push(t) },
     state: { set: async () => ({ isSet: true, version: 1 }) },
     prompt: { submit: async (i: { text: string }) => void submits.push(i.text) },
-    agent: { spawn: async (a: any) => { spawned.push(a); return { model: 'sonnet', agentId: 'redo-1' } } },
+    agent: { spawn: async (a: any) => { spawned.push(a); if (completeAtSpawn) void onTurnComplete($, st, done('redo-1') as any, (async (e: any) => ({ text: e.text })) as any); return { model: 'sonnet', agentId: 'redo-1' } } },
   }
   const st = createState({})
   const claude = () => [...store.keys()].filter(k => k.startsWith('claude-inflight/'))
@@ -202,6 +202,12 @@ test('dw34_the_redo_has_no_model_key_when_the_call_had_none', async () => {
   await d.launch()
   expect(d.spawned).toHaveLength(1)
   expect('model' in d.spawned[0]).toBe(false)
+})
+
+test('dw34_a_redo_that_completes_before_it_is_mapped_releases_its_reservation', async () => {
+  const d = driven(true)
+  await d.launch()
+  expect(d.claude()).toEqual([])
 })
 
 test('dw38_no_cooldown_a_reservation_through_the_redo_and_one_message_at_spawn_only', async () => {
