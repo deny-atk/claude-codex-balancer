@@ -95,6 +95,43 @@ test('dw52_brief_paths_are_split_stripped_resolved_and_capped', () => {
   expect(codex.briefPaths(many, '/cwd')).toEqual(Array.from({ length: codex.BRIEF_MAX_PATHS }, (_, i) => `/p/${i}.md`))
 })
 
+// shortcut: hand-rolled seeded generator as in props.test.ts (the plugin runtime cannot import fast-check).
+function mulberry32(seed: number) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+test('prop_dw52_brief_paths_match_a_reference_extractor', () => {
+  const r = mulberry32(5201)
+  const SEPS = [' ', ', ', '`', ' (', ') ', ': ', '\n', '=', '"', '; ']
+  const pick = <T>(xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!
+  for (let i = 0; i < 300; i++) {
+    const want: string[] = []
+    let prompt = ''
+    for (let k = 0, n = Math.floor(r() * 24); k < n; k++) {
+      const j = Math.floor(r() * 30)
+      const kind = Math.floor(r() * 5)
+      const token = [`/a//b${j}.md`, `r${j}/x.md`, `./d${j}/y`, `word${j}`, `~/h${j}`][kind]!
+      const resolved = [`/a/b${j}.md`, `/cwd/r${j}/x.md`, `/cwd/d${j}/y`, null, null][kind]
+      if (resolved && !want.includes(resolved)) want.push(resolved)
+      prompt += pick(SEPS) + token
+    }
+    prompt += pick(SEPS)
+    expect(codex.briefPaths(prompt, '/cwd')).toEqual(want.slice(0, codex.BRIEF_MAX_PATHS))
+    // With trailing sentence punctuation anywhere, every candidate stays absolute, single-slashed and unique.
+    const got = codex.briefPaths(prompt.replace(/ /g, () => pick(['. ', '! ', ' '])), '/cwd')
+    for (const p of got) expect(p.startsWith('/') && !p.includes('//')).toBe(true)
+    expect(new Set(got).size).toBe(got.length)
+    expect(got.length).toBeLessThanOrEqual(codex.BRIEF_MAX_PATHS)
+  }
+})
+
 // ---------- dw53: a file outside the repository is not read ----------
 
 test('dw53_a_brief_file_outside_the_repository_and_its_worktrees_is_not_read', async ($, on) => {
@@ -114,6 +151,16 @@ test('dw53_a_relative_path_climbing_out_of_the_repository_is_not_read', async ($
   await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE} and ../outside.md` }) as any)
   expect(addDirs(w)).toEqual([WT])
   expect(w.reads).not.toContain('/main/outside.md')
+})
+
+test('dw53_a_folder_whose_name_extends_the_checkout_name_is_outside', async ($, on) => {
+  const w = repo(on)
+  file(w, BRIEF_FILE, BRIEF_TEXT)
+  w.dirs.add('/main/app-other')
+  file(w, '/main/app-other/brief.md', `Work in ${WB}.`)
+  await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE} and /main/app-other/brief.md` }) as any)
+  expect(addDirs(w)).toEqual([WT])
+  expect(w.reads).not.toContain('/main/app-other/brief.md')
 })
 
 // ---------- dw54: oversized, missing and escaping files are skipped ----------
@@ -156,6 +203,24 @@ test('dw54_a_symlink_in_the_checkout_that_points_outside_is_skipped', async ($, 
   expect(w.reads).not.toContain(`${MAIN}/notes/link.md`)
 })
 
+test('dw54_a_brief_file_that_grows_past_the_cap_after_its_stat_is_skipped', async ($, on) => {
+  const w = repo(on)
+  file(w, BRIEF_FILE, BRIEF_TEXT)
+  file(w, `${MAIN}/notes/grew.md`, `Work in ${WB}. ${'x'.repeat(codex.BRIEF_MAX_BYTES)}`)
+  w.sizes.set(`${MAIN}/notes/grew.md`, 10)
+  await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE} and ${MAIN}/notes/grew.md` }) as any)
+  expect(addDirs(w)).toEqual([WT])
+})
+
+test('dw52_a_symlink_in_the_checkout_that_lands_inside_is_read_where_it_lands_once', async ($, on) => {
+  const w = repo(on)
+  file(w, BRIEF_FILE, BRIEF_TEXT)
+  w.links.set(`${MAIN}/notes/link.md`, BRIEF_FILE)
+  await $.tool.call(agent({ ...GPW, prompt: `Follow ${MAIN}/notes/link.md, then ${BRIEF_FILE} again` }) as any)
+  expect(addDirs(w)).toEqual([WT])
+  expect(w.reads.filter((p: string) => p.startsWith(`${MAIN}/notes`))).toEqual([BRIEF_FILE])
+})
+
 test('dw54_a_named_folder_is_not_read', async ($, on) => {
   const w = repo(on)
   file(w, BRIEF_FILE, BRIEF_TEXT)
@@ -168,7 +233,7 @@ test('dw54_a_named_folder_is_not_read', async ($, on) => {
 
 test('dw55_a_file_named_inside_the_brief_file_is_not_followed', async ($, on) => {
   const w = repo(on)
-  file(w, BRIEF_FILE, `${BRIEF_TEXT} See also ${MAIN}/notes/second.md.`)
+  file(w, BRIEF_FILE, `${BRIEF_TEXT} See also ${MAIN}/notes/second.md and stop`)
   file(w, `${MAIN}/notes/second.md`, `Work in ${WB}.`)
   await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE}` }) as any)
   expect(addDirs(w)).toEqual([WT])
