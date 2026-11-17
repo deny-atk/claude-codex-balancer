@@ -297,6 +297,34 @@ test('dw48_a_dirty_worktree_file_edited_again_counts_as_changed', async ($, on) 
   expect(w.agentCalls).toHaveLength(0)
 })
 
+test('dw48_the_same_file_name_changed_in_two_sibling_worktrees_is_listed_and_saved_for_each', async ($, on) => {
+  const WB = '/main/wt-b'
+  const w = repo(on, { finalText: NOTES, git: ['', ''] })
+  w.gitAt.set(WT, ['', ' M f.py\n'])
+  w.gitAt.set(WB, ['', ' M f.py\n'])
+  w.work.set('f.py', 'F2')
+  w.tracked.add('f.py')
+  w.diffAt.set(WT, 'A-PATCH;')
+  w.diffAt.set(WB, 'B-PATCH;')
+  const r: any = await $.tool.call(agent({ ...GPW, prompt: `Edit ${WT}/f.py and ${WB}/f.py` }) as any)
+  expect(r.result.content[0].text).toContain(`Files changed so far: ${WT}/f.py, ${WB}/f.py.`)
+  expect(w.files.get(`${DATA}/runs/${r.result.agentId}.patch`)).toBe('A-PATCH;B-PATCH;')
+})
+
+test('dw48_git_failing_in_one_worktree_keeps_the_other_patch_and_lists_every_file', async ($, on) => {
+  const WB = '/main/wt-b'
+  const w = repo(on, { finalText: NOTES, git: ['', ''] })
+  w.gitAt.set(WT, ['', ' M f.py\n'])
+  w.gitAt.set(WB, ['', ' M f.py\n'])
+  w.work.set('f.py', 'F2')
+  w.tracked.add('f.py')
+  w.lsFailAt.add(WT)
+  w.diffAt.set(WB, 'B-PATCH;')
+  const r: any = await $.tool.call(agent({ ...GPW, prompt: `Edit ${WT}/f.py and ${WB}/f.py` }) as any)
+  expect(r.result.content[0].text).toContain(`Files changed so far: ${WT}/f.py, ${WB}/f.py.`)
+  expect(w.files.get(`${DATA}/runs/${r.result.agentId}.patch`)).toBe('B-PATCH;')
+})
+
 test('dw48_the_run_record_carries_the_named_worktree_for_a_restart', async ($, on) => {
   const w = repo(on)
   let seen: any
@@ -330,6 +358,15 @@ test('dw49_a_background_run_not_redone_for_effort_sends_its_repeat_to_claude', a
   expect(w.spawns).toHaveLength(1)
   expect(logLines(w).map(l => l.reason)).toEqual(['codex-ahead', 'codex-blocked-repeat'])
   expect(logLines(w)[1]).toMatchObject({ route: 'claude', agentType: 'Explore' })
+})
+
+test('dw49_a_background_run_not_redone_for_mode_sends_its_repeat_to_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES })
+  await bgLaunch($, w, { mode: 'acceptEdits' })
+  w.finalText = 'fine'
+  const r: any = await $.tool.call(agent() as any)
+  expect(r.result).toEqual({ status: 'claude-ran' })
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat' })
 })
 
 test('dw49_a_redo_that_could_not_start_sends_the_repeat_to_claude', async ($, on) => {
