@@ -9,7 +9,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, namedWorktrees, parseGitRoots, parseWorktrees, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
+  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, namedWorktrees, briefPaths, BRIEF_MAX_BYTES, parseGitRoots, parseWorktrees, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate } from './policy'
@@ -582,10 +582,13 @@ async function writableRoots($: EngineInterface, st: State, cwd: string, prompt:
     if (top !== cwd.replace(/\/+/g, '/') && (await usable(top))) dirs.push(top)
     // A brief that names a sibling linked worktree of this repository (the shell in one checkout, the work in another)
     // makes that worktree writable. Only roots git lists for this repository qualify, never a path taken from the brief.
+    // A brief file the prompt names counts too, so a brief kept in the main checkout can name the worktree.
     try {
       const listed = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: roots.toplevel })
       if (listed.exitCode === 0) {
-        for (const d of namedWorktrees(prompt, parseWorktrees(listed.stdout))) {
+        const all = parseWorktrees(listed.stdout)
+        const fromFiles = (await briefTexts($, prompt, cwd, [top, ...all])).flatMap(t => namedWorktrees(t, all))
+        for (const d of new Set([...namedWorktrees(prompt, all), ...fromFiles])) {
           if (d !== top && (await usable(d))) worktrees.push(d)
         }
       }
@@ -602,6 +605,33 @@ async function writableRoots($: EngineInterface, st: State, cwd: string, prompt:
     if (await usable(d)) dirs.push(d)
   }
   return { gitCwd: roots?.toplevel ?? cwd, addDirs: [...new Set(dirs)], worktrees }
+}
+
+// The text of each file the prompt names that is a regular file of at most BRIEF_MAX_BYTES landing inside one of
+// `roots` (the repository and its listed worktrees), read where it lands. Paths inside these files are not followed.
+// Anything that cannot be placed or read is skipped. The text is only matched against worktree roots, never kept.
+async function briefTexts($: EngineInterface, prompt: string, cwd: string, roots: readonly string[]): Promise<string[]> {
+  const paths = briefPaths(prompt, cwd)
+  if (!paths.length) return []
+  const stat = (p: string) => $.fs.stat(p, { resolve: true }).catch(() => undefined)
+  const bases: string[] = []
+  for (const r of new Set(roots)) {
+    const s = await stat(r)
+    if (s?.kind === 'dir' && s.realPath && s.realPath.length > 1) bases.push(`${s.realPath.replace(/\/+$/, '')}/`)
+  }
+  const seen = new Set<string>()
+  const texts: string[] = []
+  for (const p of paths) {
+    const s = await stat(p)
+    const real = s?.realPath
+    if (s?.kind !== 'file' || s.size > BRIEF_MAX_BYTES || !real || seen.has(real) || !bases.some(b => real.startsWith(b))) continue
+    seen.add(real)
+    try {
+      const t = await $.fs.read(real)
+      if (typeof t === 'string' && t.length <= BRIEF_MAX_BYTES) texts.push(t)
+    } catch { /* skipped */ }
+  }
+  return texts
 }
 
 // The change check: the shell's repository plus each brief-named worktree, whose lines carry its root so the paths name
