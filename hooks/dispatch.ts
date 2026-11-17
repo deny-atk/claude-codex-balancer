@@ -9,7 +9,7 @@ import {
 import type { DecisionEntry, RowRun } from './balance'
 import {
   asyncLaunchedRecord, buildCodexArgv, buildFailureText, buildReport, changedSince, completedRecord,
-  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, namedWorktrees, briefPaths, BRIEF_MAX_BYTES, parseGitRoots, parseWorktrees, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
+  codexModelFor, effortFor, gitSnapshot, modelExcluded, grantsFor, namedWorktrees, briefPaths, BRIEF_MAX_BYTES, utf8Bytes, parseGitRoots, parseWorktrees, projectKey, safeDirSyntax, newAgentId, parseEffortMap, partialBlock, runCodex, sandboxFor, taskStopRecord,
 } from './codex'
 import type { CodexRun, Sandbox } from './codex'
 import { decide, score, updateEstimate } from './policy'
@@ -628,7 +628,7 @@ async function briefTexts($: EngineInterface, prompt: string, cwd: string, roots
     seen.add(real)
     try {
       const t = await $.fs.read(real)
-      if (typeof t === 'string' && t.length <= BRIEF_MAX_BYTES) texts.push(t)
+      if (typeof t === 'string' && utf8Bytes(t) <= BRIEF_MAX_BYTES) texts.push(t)
     } catch { /* skipped */ }
   }
   return texts

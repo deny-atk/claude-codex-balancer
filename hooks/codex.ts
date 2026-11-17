@@ -139,6 +139,16 @@ export function namedWorktrees(prompt: string, roots: readonly string[]): string
 export const BRIEF_MAX_BYTES = 64 * 1024
 export const BRIEF_MAX_PATHS = 16
 
+/** UTF-8 length of `text`: what a file of that text weighs on disk. */
+export function utf8Bytes(text: string): number {
+  let n = 0
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4
+  }
+  return n
+}
+
 /**
  * Files the prompt may name, to read for worktree mentions: absolute paths, and relative ones with a `/` resolved
  * against `cwd`. Loose on purpose (a wrong candidate only costs a failed stat), so a candidate ending in sentence

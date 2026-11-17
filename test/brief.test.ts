@@ -49,6 +49,8 @@ test('dw52_a_brief_file_in_the_checkout_that_names_a_sibling_worktree_adds_its_r
   expect(w.reads).toContain(BRIEF_FILE)
   expect(JSON.stringify(logLines(w))).not.toContain('FILE-SECRET-41')
   expect([...w.store.values()].some(v => JSON.stringify(v ?? null).includes('FILE-SECRET-41'))).toBe(false)
+  expect(JSON.stringify(w.spawns)).not.toContain('FILE-SECRET-41')
+  expect(JSON.stringify(w.spawns)).toContain(BRIEF_FILE)
 })
 
 test('dw52_a_brief_path_ending_a_sentence_is_followed', async ($, on) => {
@@ -212,6 +214,38 @@ test('dw54_a_brief_file_that_grows_past_the_cap_after_its_stat_is_skipped', asyn
   expect(addDirs(w)).toEqual([WT])
 })
 
+test('dw54_a_multibyte_brief_file_that_grows_past_the_byte_cap_after_its_stat_is_skipped', async ($, on) => {
+  const w = repo(on)
+  file(w, BRIEF_FILE, BRIEF_TEXT)
+  const grown = `Work in ${WB}. ${'é'.repeat(40000)}` // under 64 Ki string units, over 64 KiB in UTF-8
+  expect(grown.length).toBeLessThan(codex.BRIEF_MAX_BYTES)
+  file(w, `${MAIN}/notes/grew.md`, grown)
+  w.sizes.set(`${MAIN}/notes/grew.md`, 10)
+  await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE} and ${MAIN}/notes/grew.md` }) as any)
+  expect(addDirs(w)).toEqual([WT])
+})
+
+test('dw52_utf8_bytes_counts_each_character_by_its_encoded_length', () => {
+  expect(codex.utf8Bytes('')).toBe(0)
+  expect(codex.utf8Bytes('a/é€𐐀')).toBe(1 + 1 + 2 + 3 + 4)
+})
+
+test('dw52_two_brief_files_and_the_prompt_add_each_named_root_once_prompt_first', async ($, on) => {
+  const w = repo(on)
+  file(w, BRIEF_FILE, `Edit ${WB}/a and ${WT}/b.`)
+  file(w, `${MAIN}/notes/two.md`, `Then ${WB}/c.`)
+  await $.tool.call(agent({ ...GPW, prompt: `Edit ${WT}/x, follow ${BRIEF_FILE} and ${MAIN}/notes/two.md` }) as any)
+  expect(addDirs(w)).toEqual([WT, WB])
+})
+
+test('dw52_the_second_of_two_brief_files_can_add_the_root', async ($, on) => {
+  const w = repo(on)
+  file(w, BRIEF_FILE, 'Nothing about worktrees here.')
+  file(w, `${MAIN}/notes/two.md`, `Work in ${WB}.`)
+  await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE} and ${MAIN}/notes/two.md` }) as any)
+  expect(addDirs(w)).toEqual([WB])
+})
+
 test('dw52_a_symlink_in_the_checkout_that_lands_inside_is_read_where_it_lands_once', async ($, on) => {
   const w = repo(on)
   file(w, BRIEF_FILE, BRIEF_TEXT)
@@ -223,6 +257,7 @@ test('dw52_a_symlink_in_the_checkout_that_lands_inside_is_read_where_it_lands_on
 
 test('dw54_a_named_folder_is_not_read', async ($, on) => {
   const w = repo(on)
+  w.dirs.add(`${MAIN}/notes`)
   file(w, BRIEF_FILE, BRIEF_TEXT)
   await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE} in ${MAIN}/notes` }) as any)
   expect(addDirs(w)).toEqual([WT])
