@@ -46,7 +46,12 @@ in-flight Codex runs, so installs are rare and deliberate:
 
 - The installed copy comes from a separate clean checkout of `main`, outside
   this working folder, never from a branch or a working tree. The local
-  marketplace points at that checkout.
+  marketplace points at that checkout in two places: its entry in
+  `~/.claude/plugins/known_marketplaces.json`, and its entry under
+  `extraKnownMarketplaces` in `~/.claude/settings.json` if there is one. The
+  engine restores the marketplace from the settings entry, so a switch made in
+  the first file alone is undone. Check `claude plugin list`: it names the
+  folder the plugin is read from.
 - Update it only after a merge, and only when no Codex run is in flight in
   any session. The plugin's store file under `~/.claude/plugins/store/` has no
   `inflight/` or `run/` keys then, and `pgrep -f "codex exec"` finds nothing.
