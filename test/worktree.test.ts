@@ -78,6 +78,7 @@ const NOT_NAMED: [string, string][] = [
   ['root_with_a_suffix', '/main/wt-a.old/x'],
   ['embedded_in_a_longer_path', '/backup/main/wt-a/x'],
   ['relative', 'main/wt-a/x'],
+  ['non_ascii_suffix', '/main/wt-aé/x'],
   ['unlisted_path', '/elsewhere/repo/x.py'],
 ]
 for (const [id, prompt, want] of NAMED) test(`dw45_named_${id}`, () => expect(codex.namedWorktrees(prompt, ROOTS)).toEqual(want))
@@ -202,6 +203,40 @@ test('dw48_a_lost_run_reports_files_changed_in_the_named_worktree', async ($, on
   expect(w.submits[0]).not.toContain('Nothing was changed')
 })
 
+test('dw48_a_saved_patch_holds_both_checkouts_with_the_worktree_root_in_its_names', async ($, on) => {
+  const w = repo(on, { finalText: NOTES, git: ['', ' M a.py\n'] })
+  w.gitAt.set(WT, ['', ' M src/x.py\n'])
+  w.work.set('a.py', 'A2')
+  w.work.set('src/x.py', 'X2')
+  w.tracked.add('a.py')
+  w.tracked.add('src/x.py')
+  w.diff = 'PART;'
+  const r: any = await $.tool.call(agent({ ...GPW, prompt: BRIEF }) as any)
+  expect(r.result.content[0].text).toContain(`Files changed so far: a.py, ${WT}/src/x.py.`)
+  const diffs = w.gitCalls.map((c, i) => [c, w.gitCwds[i]] as const).filter(([c]) => c[1] === 'diff')
+  expect(diffs).toEqual([
+    [['git', 'diff', 'HEAD', '--', 'a.py'], MAIN],
+    [['git', 'diff', 'HEAD', `--src-prefix=a${WT}/`, `--dst-prefix=b${WT}/`, '--', 'src/x.py'], WT],
+  ])
+  expect(w.files.get(`${DATA}/runs/${r.result.agentId}.patch`)).toBe('PART;PART;')
+})
+
+test('dw48_the_run_record_carries_the_named_worktree_for_a_restart', async ($, on) => {
+  const w = repo(on)
+  let seen: any
+  w.during = () => { seen = [...w.store.entries()].find(([k]) => k.startsWith('run/'))?.[1] }
+  await $.tool.call(agent({ ...GPW, prompt: BRIEF }) as any)
+  expect(seen.worktrees).toEqual([WT])
+})
+
+test('dw48_a_finished_run_reports_files_changed_in_the_worktree', async ($, on) => {
+  const w = repo(on, { git: ['', ''] })
+  w.gitAt.set(WT, ['', ' M src/x.py\n'])
+  w.work.set('src/x.py', 'NEW')
+  const r: any = await $.tool.call(agent({ ...GPW, prompt: BRIEF }) as any)
+  expect(r.result.content[0].text).toContain(`Changed or untracked files (git status):\n${WT}/src/x.py`)
+})
+
 // ---------- dw49: the repeat of a blocked call that was not redone goes to Claude ----------
 
 const bgLaunch = async ($: any, w: any, over: Record<string, unknown> = {}) => {
@@ -284,7 +319,58 @@ test('dw49_an_excluded_model_keeps_its_own_reason', async ($, on) => {
   expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'model-excluded' })
 })
 
+test('dw49_a_background_blocked_run_with_changed_files_sends_the_repeat_to_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES, git: ['', ' M a.py'] })
+  await bgLaunch($, w, GPW)
+  expect(w.submits[0]).toContain('Codex stopped before finishing (blocked)')
+  const r: any = await $.tool.call(agent(GPW) as any)
+  expect(r.result).toEqual({ status: 'claude-ran' })
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat' })
+})
+
+test('dw49_in_mode_codex_the_repeat_still_goes_to_claude', { options: { mode: 'codex' } as any }, async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES })
+  await bgLaunch($, w, { effort: 'high' })
+  const r: any = await $.tool.call(agent() as any)
+  expect(r.result).toEqual({ status: 'claude-ran' })
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat', mode: 'codex' })
+})
+
+test('dw49_mode_claude_keeps_its_reason_and_does_not_use_up_the_repeat', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES })
+  await bgLaunch($, w, { effort: 'high' })
+  await $.command.run({ command: 'balance', args: 'claude' } as any)
+  await $.tool.call(agent() as any)
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'mode-claude' })
+  await $.command.run({ command: 'balance', args: 'auto' } as any)
+  await $.tool.call(agent() as any)
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat' })
+})
+
+test('dw49_a_repeat_from_another_session_routes_normally', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES })
+  await bgLaunch($, w, { effort: 'high' })
+  w.finalText = 'fine'
+  w.sid = 'sess-2'
+  const r: any = await $.tool.call(agent() as any)
+  expect(r.result.status).toBe('completed')
+  w.sid = SID
+  const r2: any = await $.tool.call(agent() as any)
+  expect(r2.result).toEqual({ status: 'claude-ran' })
+})
+
 // ---------- dw50: other calls route normally ----------
+
+test('dw50_a_different_call_does_not_use_up_the_repeat', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES })
+  await bgLaunch($, w, { effort: 'high' })
+  w.finalText = 'fine'
+  await $.tool.call(agent({ description: 'another task', prompt: 'another brief' }) as any)
+  const r: any = await $.tool.call(agent() as any)
+  expect(r.result).toEqual({ status: 'claude-ran' })
+  expect(logLines(w).map(l => l.reason)).toEqual(['codex-ahead', 'codex-ahead', 'codex-blocked-repeat'])
+})
+
 
 test('dw50_a_different_call_right_after_routes_normally', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { finalText: NOTES })

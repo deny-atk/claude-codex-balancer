@@ -114,7 +114,7 @@ export function parseWorktrees(stdout: string): string[] {
   })
 }
 
-const PATH_CHAR = /[A-Za-z0-9._~+@/-]/
+const PATH_CHAR = /[\p{L}\p{N}\p{M}._~+@/-]/u // letters of any script continue a name
 /**
  * The listed roots the brief names: the root itself or a path under it, with no path character on either side (a
  * sentence's closing period is not one). Only listed roots can come out, never a path taken from the brief.
