@@ -135,6 +135,37 @@ export function namedWorktrees(prompt: string, roots: readonly string[]): string
   return [...new Set(roots)].filter(r => r.length > 1 && named(r))
 }
 
+/** The size cap and the path count bound for brief files the prompt names. */
+export const BRIEF_MAX_BYTES = 64 * 1024
+export const BRIEF_MAX_PATHS = 16
+
+/** UTF-8 length of `text`: what a file of that text weighs on disk. */
+export function utf8Bytes(text: string): number {
+  let n = 0
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4
+  }
+  return n
+}
+
+/**
+ * Files the prompt may name, to read for worktree mentions: absolute paths, and relative ones with a `/` resolved
+ * against `cwd`. Loose on purpose (a wrong candidate only costs a failed stat), so a candidate ending in sentence
+ * punctuation is also tried without it. Where each lands is checked by the caller, never here.
+ */
+export function briefPaths(prompt: string, cwd: string): string[] {
+  const out = new Set<string>()
+  for (const token of prompt.split(/[\s'"`()[\]{}<>,;=:]+/)) {
+    for (const t of new Set([token, token.replace(/[.!?]+$/, '')])) {
+      if (!t.includes('/') || t.startsWith('~')) continue
+      const p = (t.startsWith('/') ? t : `${cwd}/${t.replace(/^(\.\/)+/, '')}`).replace(/\/+/g, '/')
+      if (p.length > 1) out.add(p)
+    }
+  }
+  return [...out].slice(0, BRIEF_MAX_PATHS)
+}
+
 /** The folders listed for `key` in the user's `writable-dirs.json`; anything unreadable is no grants. */
 export function grantsFor(text: string | undefined, key: string): string[] {
   if (text === undefined) return []

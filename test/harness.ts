@@ -54,6 +54,9 @@ export type World = {
   commonDir: string // what `--git-common-dir` answers
   dirs: Set<string> // extra existing folders for $.fs.stat
   fileStats: Set<string> // paths $.fs.stat reports as regular files
+  sizes: Map<string, number> // a regular file's size; else its text's length in `files`, else 1
+  links: Map<string, string> // a symbolic link and the path it lands on, for $.fs.stat
+  reads: string[] // every $.fs.read path, in order
   work: Map<string, string> // file contents the stubbed `git hash-object` hashes, by path
   during?: () => void // runs when a Codex process starts: a test edits `work` here
   gate: Promise<void> // script 'gate': the run finishes once this resolves
@@ -118,7 +121,7 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], agentSpawns: [], stopCalls: [],
-    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(),
+    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(), sizes: new Map(), links: new Map(), reads: [],
     gate: undefined as any, openGate: () => {},
     git: [''], gitAt: new Map(), worktrees: '', worktreeCwds: [], diffAt: new Map(), lsFailAt: new Set(), sid: SID, rollout: null, usage: [], loginChecks: 0, failWrites: false, hashFail: new Set(), failStoreWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
@@ -143,12 +146,16 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
   on('store.keys', () => ({ value: [...w.store.keys()] }))
 
   on('fs.stat', (_$: any, e: any) => {
-    if (e.path === w.cwd && w.cwdExists) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
-    if (w.dirs.has(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
-    if (w.fileStats.has(e.path)) return { value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } }
+    const isLink = w.links.has(e.path)
+    const p = w.links.get(e.path) ?? e.path
+    const real = e.resolve ? { realPath: p } : {}
+    if ((p === w.cwd && w.cwdExists) || w.dirs.has(p)) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink, ...real } }
+    if (w.fileStats.has(p)) return { value: { kind: 'file', size: w.sizes.get(p) ?? w.files.get(p)?.length ?? 1, mtimeMs: 0, isLink, ...real } }
+    if (isLink) return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink } }
     throw new Error('ENOENT')
   })
   on('fs.read', (_$: any, e: any) => {
+    w.reads.push(e.path)
     const t = w.files.get(e.path)
     if (t === undefined) throw new Error('ENOENT')
     return { value: t }
