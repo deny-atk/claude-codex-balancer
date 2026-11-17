@@ -122,6 +122,13 @@ test('dw46_a_brief_naming_only_unlisted_paths_adds_nothing', async ($, on) => {
   expect(w.spawns[0]!.argv).not.toContain('--add-dir')
 })
 
+test('dw46_of_a_listed_and_an_unlisted_path_only_the_listed_worktree_is_added', async ($, on) => {
+  const w = repo(on)
+  w.dirs.add('/elsewhere/repo')
+  await $.tool.call(agent({ ...GPW, prompt: `Edit ${WT}/src/x.py and /elsewhere/repo/x.py` }) as any)
+  expect(addDirs(w)).toEqual([WT])
+})
+
 test('dw46_a_listed_worktree_whose_folder_is_missing_adds_nothing', async ($, on) => {
   const w = repo(on)
   w.dirs.delete(WT)
