@@ -12,7 +12,7 @@ export type PolicyConfig = { margin: number; ceilingFiveHour: number; ceilingSev
 export type ReasonCode =
   | 'mode-off' | 'mode-claude' | 'mode-codex' | 'codex-unavailable' | 'codex-limit' | 'codex-concurrency'
   | 'codex-ceiling' | 'claude-ceiling' | 'no-codex-reading' | 'codex-ahead' | 'claude-ahead' | 'codex-cooldown' | 'model-excluded'
-  | 'codex-blocked' | 'agent-excluded'
+  | 'codex-blocked' | 'codex-blocked-repeat' | 'agent-excluded'
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x))
 

@@ -1,6 +1,6 @@
 {
   "name": "balancer",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "Shares delegated subagent work between Claude and the local Codex CLI so both subscriptions are used at a similar pace.",
   "author": {
     "name": "Balancer"
