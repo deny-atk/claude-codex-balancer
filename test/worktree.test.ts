@@ -2,7 +2,7 @@
 // call whose Codex run ended blocked and was not redone goes to Claude (DW49-51).
 import { test, expect } from 'claude-code/testing'
 import * as codex from '../hooks/codex'
-import { CODEX_AHEAD, DATA, NOW, SID, agent, logLines, settleReal, startSession, world } from './harness'
+import { CODEX_AHEAD, D, DATA, H, NOW, SID, agent, logLines, reading, settleReal, startSession, world } from './harness'
 
 const MAIN = '/main/app'
 const WT = '/main/wt-a'
@@ -263,6 +263,9 @@ test('dw49_a_repeat_after_thirty_minutes_routes_normally', async ($, on) => {
   await bgLaunch($, w, { effort: 'high' })
   w.finalText = 'fine'
   await w.clock.advance(30 * 60_000 + 1000)
+  const later = NOW + 30 * 60_000 + 1000 // fresh readings, so only the window can change the route
+  w.store.set('reading/claude', reading({ fiveUsed: 80, fiveLeft: 2 * H, sevenUsed: 80, sevenLeft: 2 * D, readAt: later }))
+  w.store.set('reading/codex', reading({ fiveUsed: 5, fiveLeft: 4 * H, sevenUsed: 5, sevenLeft: 5 * D, readAt: later }))
   const r: any = await $.tool.call(agent() as any)
   expect(r.result.status).toBe('completed')
 })

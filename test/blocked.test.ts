@@ -253,7 +253,7 @@ for (const [id, over, why] of [['deny', { agentSpawnDeny: 'no agents' }, 'no age
     if (why) expect(w.submits[0]).toBe(head + why + tail)
     expect(logLines(w).map(l => l.reason)).toEqual(['codex-ahead'])
     w.finalText = 'fine'
-    const r2: any = await $.tool.call(agent() as any)
+    const r2: any = await $.tool.call(agent({ description: 'another task', prompt: 'another brief' }) as any) // dw49: the same call would be a repeat
     expect(r2.result.status).toBe('completed') // no cooldown
   })
 }
