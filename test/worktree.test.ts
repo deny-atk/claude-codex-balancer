@@ -43,6 +43,15 @@ test('dw45_a_brief_naming_a_path_in_a_sibling_worktree_adds_its_root', async ($,
   expect(worktreeCalls(w)).toEqual([['git', 'worktree', 'list', '--porcelain']])
 })
 
+test('dw45_the_worktree_list_is_asked_at_the_repository_top_from_a_subfolder', async ($, on) => {
+  const w = repo(on)
+  w.cwd = `${MAIN}/pkg`
+  w.dirs.add(MAIN)
+  await $.tool.call(agent({ ...GPW, prompt: BRIEF }) as any)
+  expect(w.worktreeCwds).toEqual([MAIN])
+  expect(addDirs(w)).toEqual([MAIN, WT])
+})
+
 test('dw45_a_bare_root_mention_at_the_end_of_a_sentence_counts', async ($, on) => {
   const w = repo(on)
   await $.tool.call(agent({ ...GPW, prompt: 'Work in `/main/wt-b`.' }) as any)
@@ -62,10 +71,6 @@ test('dw45_parse_worktrees_lists_roots_and_skips_bare_entries', () => {
   expect(codex.parseWorktrees('')).toEqual([])
 })
 
-test('dw45_an_astral_symbol_that_is_not_a_letter_still_ends_the_root', () => {
-  expect(codex.namedWorktrees(`${WT}\u{1F600} done`, [WT])).toEqual([WT])
-})
-
 const ROOTS = [MAIN, WT, '/main/wt-b', '/srv/my tree']
 const NAMED: [string, string, string[]][] = [
   ['path_under_root', `edit ${WT}/src/x.py now`, [WT]],
@@ -74,6 +79,8 @@ const NAMED: [string, string, string[]][] = [
   ['root_in_quotes', `"${WT}"`, [WT]],
   ['root_in_backticks_then_comma', `\`${WT}\`, then stop`, [WT]],
   ['root_with_a_space', 'Use /srv/my tree/notes.md', ['/srv/my tree']],
+  ['after_an_equals_sign', `--dir=${WT}`, [WT]],
+  ['in_parentheses', `(see ${WT})`, [WT]],
   ['two_roots', `${WT}/a and /main/wt-b/b`, [WT, '/main/wt-b']],
   ['prefix_sibling_then_real', `/main/wt-ab/x and later ${WT}/y`, [WT]],
 ]
@@ -85,6 +92,8 @@ const NOT_NAMED: [string, string][] = [
   ['non_ascii_suffix', '/main/wt-aé/x'],
   ['astral_letter_suffix', '/main/wt-a\u{10400}/x'],
   ['astral_letter_prefix', '/x\u{10400}/main/wt-a/y'],
+  ['equals_suffix', '/main/wt-a=other/src/x.py'],
+  ['hash_suffix', '/main/wt-a#2/x'],
   ['unlisted_path', '/elsewhere/repo/x.py'],
 ]
 for (const [id, prompt, want] of NAMED) test(`dw45_named_${id}`, () => expect(codex.namedWorktrees(prompt, ROOTS)).toEqual(want))
@@ -101,6 +110,7 @@ function mulberry32(seed: number) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
 }
+const CONTINUES = ['a', 'Z', '0', '-', '_', '=', '#', '%', '&', '+', '@', '~', '$', 'é', '\u{10400}', '\u{1F600}', '|', '*', '^']
 const FRAGMENTS = [...ROOTS, '/main/wt-a2', '/main', '/main/', 'x', '.', ',', ' ', '`', '"', '/src/f.py', '-old', '/backup', '\n']
 
 test('prop_dw45_parse_worktrees_returns_the_non_bare_roots_in_order_whatever_the_metadata', () => {
@@ -134,6 +144,9 @@ test('prop_dw45_named_roots_are_listed_and_mentioned_and_a_spaced_mention_is_alw
     expect(new Set(got).size).toBe(got.length)
     const root = ROOTS[Math.floor(r() * ROOTS.length)]!
     expect(codex.namedWorktrees(`${prompt} ${root} ${prompt}`, ROOTS)).toContain(root)
+    // Oracle: a root followed by any character that is not a separator is a longer name, never a mention.
+    const c = CONTINUES[Math.floor(r() * CONTINUES.length)]!
+    expect(codex.namedWorktrees(`see ${WT}${c}x/y`, [WT])).toEqual([])
   }
 })
 
@@ -274,6 +287,16 @@ for (const fail of ['exit', 'throw'] as const) {
   })
 }
 
+test('dw48_a_dirty_worktree_file_edited_again_counts_as_changed', async ($, on) => {
+  const w = repo(on, { finalText: NOTES, git: ['', ''] })
+  w.gitAt.set(WT, [' M src/x.py\n'])
+  w.work.set('src/x.py', 'BEFORE')
+  w.during = () => { w.work.set('src/x.py', 'AFTER') }
+  const r: any = await $.tool.call(agent({ ...GPW, prompt: BRIEF }) as any)
+  expect(r.result.content[0].text).toContain(`Files changed so far: ${WT}/src/x.py.`)
+  expect(w.agentCalls).toHaveLength(0)
+})
+
 test('dw48_the_run_record_carries_the_named_worktree_for_a_restart', async ($, on) => {
   const w = repo(on)
   let seen: any
@@ -363,6 +386,23 @@ test('dw49_only_the_first_repeat_is_moved', async ($, on) => {
   const r: any = await $.tool.call(agent() as any)
   expect(r.result.status).toBe('completed')
   expect(w.spawns).toHaveLength(2)
+})
+
+test('dw49_two_blocked_runs_of_the_same_call_move_one_repeat', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES, script: 'gate' })
+  const call = agent({ run_in_background: true, effort: 'high' }) as any
+  await $.tool.call(call) // both in flight before either ends, so neither is a repeat
+  await $.tool.call(call)
+  await settleReal(() => w.spawns.length === 2)
+  expect(w.spawns).toHaveLength(2)
+  w.openGate()
+  await settleReal(() => w.submits.length >= 2)
+  w.script = 'ok'
+  w.finalText = 'fine'
+  const first: any = await $.tool.call(agent() as any)
+  const second: any = await $.tool.call(agent() as any)
+  expect(first.result).toEqual({ status: 'claude-ran' })
+  expect(second.result.status).toBe('completed')
 })
 
 test('dw49_a_repeat_after_thirty_minutes_routes_normally', async ($, on) => {

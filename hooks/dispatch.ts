@@ -787,7 +787,10 @@ const AGAIN = 'Delegate it again with the same description; that call will run o
 
 async function armRepeat($: EngineInterface, st: State, c: Task): Promise<void> {
   const now = await $.clock.now()
-  st.blockedCalls = st.blockedCalls.filter(b => b.until > now)
+  const description = sameDescription(c.description)
+  // One armed entry per call: a second blocked run of the same call does not move a second repeat.
+  st.blockedCalls = st.blockedCalls.filter(b => b.until > now &&
+    !(b.sessionId === c.sessionId && b.type === c.type && b.description === description && b.prompt === c.prompt))
   st.blockedCalls.push({ sessionId: c.sessionId, type: c.type, description: sameDescription(c.description), prompt: c.prompt, until: now + REPEAT_WINDOW_MS })
 }
 

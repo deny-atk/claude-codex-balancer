@@ -114,19 +114,21 @@ export function parseWorktrees(stdout: string): string[] {
   })
 }
 
-const PATH_CHAR = /[\p{L}\p{N}\p{M}._~+@/-]/u // letters of any script continue a name
+// Almost any character can continue a file name, so a mention is bounded only by these separators, never by
+// "not a path character".
+const OPENS = /[\s'"`([{<=:,]/
+const CLOSES = /[\s'"`)\]}>,;:!?]/
 /**
- * The listed roots the brief names: the root itself or a path under it, with no path character on either side (a
- * sentence's closing period is not one). Only listed roots can come out, never a path taken from the brief.
+ * The listed roots the brief names: the root itself, or a path under it, set off by a separator on each side (a
+ * closing period counts). Only listed roots can come out, never a path taken from the brief.
  */
 export function namedWorktrees(prompt: string, roots: readonly string[]): string[] {
   const named = (root: string) => {
     for (let i = prompt.indexOf(root); i >= 0; i = prompt.indexOf(root, i + 1)) {
-      // Whole characters, not UTF-16 units: a letter outside the basic plane is a surrogate pair.
-      const before = Array.from(prompt.slice(Math.max(0, i - 2), i)).at(-1)
-      const [a0, a1] = Array.from(prompt.slice(i + root.length, i + root.length + 4))
-      const after = a0 === '.' && !PATH_CHAR.test(a1 ?? ' ') ? ' ' : a0 ?? ' '
-      if ((before === undefined || !PATH_CHAR.test(before)) && (after === '/' || !PATH_CHAR.test(after))) return true
+      const before = prompt[i - 1]
+      const [a0, a1] = [prompt[i + root.length], prompt[i + root.length + 1]]
+      const ends = (c: string | undefined) => c === undefined || CLOSES.test(c)
+      if ((before === undefined || OPENS.test(before)) && (a0 === '/' || ends(a0) || (a0 === '.' && ends(a1)))) return true
     }
     return false
   }

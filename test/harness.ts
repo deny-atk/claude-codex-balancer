@@ -62,6 +62,7 @@ export type World = {
   gitAt: Map<string, (string | null)[]> // the same, for a status asked in that folder (another worktree); others use `git`
   worktrees: string // stdout of `git worktree list --porcelain`
   worktreesFail?: 'exit' | 'throw' // `git worktree list` exits non-zero or cannot start
+  worktreeCwds: (string | undefined)[] // cwd of each `git worktree list`
   sid: string // what $.session.id() answers
   rollout: string | null // tail of the rollout file for THREAD
   usage: { kind: string; percentUsed: number; resetsAt?: string }[]
@@ -117,7 +118,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], agentSpawns: [], stopCalls: [],
     claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(),
     gate: undefined as any, openGate: () => {},
-    git: [''], gitAt: new Map(), worktrees: '', sid: SID, rollout: null, usage: [], loginChecks: 0, failWrites: false, hashFail: new Set(), failStoreWrites: false,
+    git: [''], gitAt: new Map(), worktrees: '', worktreeCwds: [], sid: SID, rollout: null, usage: [], loginChecks: 0, failWrites: false, hashFail: new Set(), failStoreWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
   }
   w.gate = new Promise<void>(r => { w.openGate = r })
@@ -169,6 +170,7 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
       return { value: w.toplevel === null ? { exitCode: 128, stdout: '', stderr: 'not a git repository' } : { exitCode: 0, stdout: `${w.toplevel}\n${w.commonDir}\n`, stderr: '' } }
     }
     if (a === 'git' && b === 'worktree') {
+      w.worktreeCwds.push(e.init?.cwd)
       if (w.worktreesFail === 'throw') throw new Error('spawn git ENOENT')
       return { value: { exitCode: w.worktreesFail === 'exit' ? 128 : 0, stdout: w.worktreesFail ? '' : w.worktrees, stderr: '' } }
     }
