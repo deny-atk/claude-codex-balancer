@@ -134,6 +134,25 @@ test('prop_dw52_brief_paths_match_a_reference_extractor', () => {
   }
 })
 
+test('dw52_the_limits_are_64_kib_and_16_paths', () => {
+  expect(codex.BRIEF_MAX_BYTES).toBe(65536)
+  expect(codex.BRIEF_MAX_PATHS).toBe(16)
+  const seventeen = Array.from({ length: 17 }, (_, i) => `/p/${i}`).join(' ')
+  expect(codex.briefPaths(seventeen, '/cwd')).toHaveLength(16)
+  expect(codex.briefPaths(seventeen, '/cwd').at(-1)).toBe('/p/15')
+})
+
+test('dw52_a_checkout_whose_resolved_path_differs_still_reads_its_brief', async ($, on) => {
+  const w = repo(on)
+  w.dirs.add('/real/app')
+  w.links.set(MAIN, '/real/app')
+  file(w, '/real/app/notes/brief.md', BRIEF_TEXT)
+  w.links.set(BRIEF_FILE, '/real/app/notes/brief.md')
+  await $.tool.call(agent({ ...GPW, prompt: `Follow ${BRIEF_FILE}` }) as any)
+  expect(addDirs(w)).toEqual([WT])
+  expect(w.reads).toContain('/real/app/notes/brief.md')
+})
+
 // ---------- dw53: a file outside the repository is not read ----------
 
 test('dw53_a_brief_file_outside_the_repository_and_its_worktrees_is_not_read', async ($, on) => {
