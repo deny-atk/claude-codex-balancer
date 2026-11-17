@@ -277,6 +277,7 @@ Tests are `test/*.test.ts(x)`, with the Done-when number in the name (`dw3_...`)
 
 - Changes inside granted extra folders (`writable-dirs.json`) are not tracked by the change check, which asks git about the repository only. Those folders are meant for tool caches.
 - Codex's sandbox denies process listing (for example `pgrep`) even with extra writable folders, so a brief that needs it is blocked on Codex.
+- A brief must spell a worktree root as `git worktree list` prints it; a path git quotes (one holding a newline or tab) is not matched.
 - A Codex run can edit files in a brief-named linked worktree but cannot stage or commit there: git cannot create the index lock, because the repository's git folder is not writable (and making it writable does not help for a linked worktree). The brief should leave committing to the caller.
 - The repeat of a blocked call is recognised by agent type plus description or brief, within 30 minutes, in module memory: see Blocked runs for what it misses.
 - Plan mode is seen at the next prompt: a hook cannot read the session mode, so a mode changed mid-turn is missed until the next prompt, or an Agent `mode` argument.

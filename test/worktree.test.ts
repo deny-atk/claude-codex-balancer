@@ -312,6 +312,18 @@ test('dw49_a_repeat_after_thirty_minutes_routes_normally', async ($, on) => {
   expect(r.result.status).toBe('completed')
 })
 
+test('dw49_a_repeat_just_inside_thirty_minutes_still_goes_to_claude', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: NOTES })
+  await bgLaunch($, w, { effort: 'high' })
+  w.finalText = 'fine'
+  await w.clock.advance(30 * 60_000 - 1000)
+  const later = NOW + 30 * 60_000 - 1000 // fresh readings, as in the test after the window
+  w.store.set('reading/claude', reading({ fiveUsed: 80, fiveLeft: 2 * H, sevenUsed: 80, sevenLeft: 2 * D, readAt: later }))
+  w.store.set('reading/codex', reading({ fiveUsed: 5, fiveLeft: 4 * H, sevenUsed: 5, sevenLeft: 5 * D, readAt: later }))
+  await $.tool.call(agent() as any)
+  expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat' })
+})
+
 test('dw49_an_excluded_model_keeps_its_own_reason', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { finalText: NOTES })
   await bgLaunch($, w, { effort: 'high' })
