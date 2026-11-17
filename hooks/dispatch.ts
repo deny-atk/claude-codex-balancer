@@ -720,7 +720,7 @@ async function saveWork($: EngineInterface, c: Pick<Task, 'base' | 'gitCwd' | 'c
     // A path in a brief-named worktree carries its root: git is asked in that worktree, about the path relative to it.
     const groups = new Map<string, string[]>()
     for (const p of changed) {
-      const wt = (c.worktrees ?? []).find(d => p.startsWith(d + '/')) ?? ''
+      const wt = [...(c.worktrees ?? [])].sort((a, b) => b.length - a.length).find(d => p.startsWith(d + '/')) ?? '' // the innermost of nested ones
       groups.set(wt, [...(groups.get(wt) ?? []), p])
     }
     const patches: string[] = []

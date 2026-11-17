@@ -62,6 +62,10 @@ test('dw45_parse_worktrees_lists_roots_and_skips_bare_entries', () => {
   expect(codex.parseWorktrees('')).toEqual([])
 })
 
+test('dw45_an_astral_symbol_that_is_not_a_letter_still_ends_the_root', () => {
+  expect(codex.namedWorktrees(`${WT}\u{1F600} done`, [WT])).toEqual([WT])
+})
+
 const ROOTS = [MAIN, WT, '/main/wt-b', '/srv/my tree']
 const NAMED: [string, string, string[]][] = [
   ['path_under_root', `edit ${WT}/src/x.py now`, [WT]],
@@ -79,6 +83,8 @@ const NOT_NAMED: [string, string][] = [
   ['embedded_in_a_longer_path', '/backup/main/wt-a/x'],
   ['relative', 'main/wt-a/x'],
   ['non_ascii_suffix', '/main/wt-aé/x'],
+  ['astral_letter_suffix', '/main/wt-a\u{10400}/x'],
+  ['astral_letter_prefix', '/x\u{10400}/main/wt-a/y'],
   ['unlisted_path', '/elsewhere/repo/x.py'],
 ]
 for (const [id, prompt, want] of NAMED) test(`dw45_named_${id}`, () => expect(codex.namedWorktrees(prompt, ROOTS)).toEqual(want))
@@ -96,6 +102,23 @@ function mulberry32(seed: number) {
   }
 }
 const FRAGMENTS = [...ROOTS, '/main/wt-a2', '/main', '/main/', 'x', '.', ',', ' ', '`', '"', '/src/f.py', '-old', '/backup', '\n']
+
+test('prop_dw45_parse_worktrees_returns_the_non_bare_roots_in_order_whatever_the_metadata', () => {
+  const r = mulberry32(4502)
+  const META = ['HEAD 1234', 'branch refs/heads/x', 'detached', 'locked', 'locked reason here', 'prunable gitdir file points nowhere']
+  for (let i = 0; i < 200; i++) {
+    const want: string[] = []
+    const blocks: string[] = []
+    for (let k = 0, n = 1 + Math.floor(r() * 5); k < n; k++) {
+      const root = `/r${k}/${['wt', 'my tree', 'é', 'a.b'][Math.floor(r() * 4)]}`
+      const bare = r() < 0.2
+      const meta = META.filter(() => r() < 0.4)
+      blocks.push([`worktree ${root}`, ...(bare ? ['bare'] : []), ...meta].join('\n'))
+      if (!bare) want.push(root)
+    }
+    expect(codex.parseWorktrees(blocks.join('\n\n') + '\n\n')).toEqual(want)
+  }
+})
 
 test('prop_dw45_named_roots_are_listed_and_mentioned_and_a_spaced_mention_is_always_found', () => {
   const r = mulberry32(4501)
@@ -221,6 +244,36 @@ test('dw48_a_saved_patch_holds_both_checkouts_with_the_worktree_root_in_its_name
   expect(w.files.get(`${DATA}/runs/${r.result.agentId}.patch`)).toBe('PART;PART;')
 })
 
+test('dw48_a_file_in_a_nested_named_worktree_is_saved_from_the_innermost_one', async ($, on) => {
+  const INNER = `${WT}/inner`
+  const w = repo(on, { finalText: NOTES, git: ['', ''] })
+  w.worktrees = PORCELAIN + `\nworktree ${INNER}\nHEAD 4444\ndetached\n\n`
+  w.dirs.add(INNER)
+  w.gitAt.set(WT, ['', ''])
+  w.gitAt.set(INNER, ['', ' M f.py\n'])
+  w.work.set('f.py', 'F2')
+  w.tracked.add('f.py')
+  w.diff = 'INNER;'
+  await $.tool.call(agent({ ...GPW, prompt: `Work in ${WT} and in ${INNER}/f.py` }) as any)
+  const diffs = w.gitCalls.map((c, i) => [c, w.gitCwds[i]] as const).filter(([c]) => c[1] === 'diff' || c[1] === 'ls-files')
+  expect(diffs).toEqual([
+    [['git', 'ls-files', '-z', '--', 'f.py'], INNER],
+    [['git', 'diff', 'HEAD', `--src-prefix=a${INNER}/`, `--dst-prefix=b${INNER}/`, '--', 'f.py'], INNER],
+  ])
+})
+
+for (const fail of ['exit', 'throw'] as const) {
+  test(`dw46_a_worktree_list_that_${fail}s_adds_nothing_and_keeps_the_grants`, async ($, on) => {
+    const w = repo(on, { worktreesFail: fail })
+    w.cwd = `${MAIN}/pkg`
+    w.dirs.add(MAIN)
+    w.dirs.add('/opt/g')
+    w.files.set(`${DATA}/writable-dirs.json`, JSON.stringify({ [MAIN]: ['/opt/g'] }))
+    await $.tool.call(agent({ ...GPW, prompt: BRIEF }) as any)
+    expect(addDirs(w)).toEqual([MAIN, '/opt/g'])
+  })
+}
+
 test('dw48_the_run_record_carries_the_named_worktree_for_a_restart', async ($, on) => {
   const w = repo(on)
   let seen: any
@@ -273,6 +326,18 @@ test('dw49_a_foreground_blocked_run_with_changed_files_sends_the_repeat_to_claud
   expect(w.spawns).toHaveLength(1)
   expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat', agentType: 'general-purpose' })
 })
+
+for (const bg of [false, true]) {
+  test(`dw49_a_${bg ? 'background' : 'foreground'}_blocked_run_with_an_unknown_change_check_sends_the_repeat_to_claude`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD, { finalText: NOTES, git: ['', null] })
+    if (bg) await bgLaunch($, w, GPW)
+    else await $.tool.call(agent(GPW) as any)
+    w.git = ['']
+    const r: any = await $.tool.call(agent(GPW) as any)
+    expect(r.result).toEqual({ status: 'claude-ran' })
+    expect(logLines(w).at(-1)).toMatchObject({ route: 'claude', reason: 'codex-blocked-repeat' })
+  })
+}
 
 test('dw49_the_same_brief_under_a_new_description_is_a_repeat', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { finalText: NOTES })

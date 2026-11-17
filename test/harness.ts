@@ -61,6 +61,7 @@ export type World = {
   git: (string | null)[] // successive `git status --porcelain --untracked-files=all` stdouts; null = not a repository
   gitAt: Map<string, (string | null)[]> // the same, for a status asked in that folder (another worktree); others use `git`
   worktrees: string // stdout of `git worktree list --porcelain`
+  worktreesFail?: 'exit' | 'throw' // `git worktree list` exits non-zero or cannot start
   sid: string // what $.session.id() answers
   rollout: string | null // tail of the rollout file for THREAD
   usage: { kind: string; percentUsed: number; resetsAt?: string }[]
@@ -167,7 +168,10 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     if (a === 'git' && b === 'rev-parse') {
       return { value: w.toplevel === null ? { exitCode: 128, stdout: '', stderr: 'not a git repository' } : { exitCode: 0, stdout: `${w.toplevel}\n${w.commonDir}\n`, stderr: '' } }
     }
-    if (a === 'git' && b === 'worktree') return { value: { exitCode: 0, stdout: w.worktrees, stderr: '' } }
+    if (a === 'git' && b === 'worktree') {
+      if (w.worktreesFail === 'throw') throw new Error('spawn git ENOENT')
+      return { value: { exitCode: w.worktreesFail === 'exit' ? 128 : 0, stdout: w.worktreesFail ? '' : w.worktrees, stderr: '' } }
+    }
     if (a === 'git') { w.gitCalls.push([...(e.argv as string[])]); w.gitCwds.push(e.init?.cwd) }
     if (a === 'git' && b === 'ls-files') {
       const paths = (e.argv as string[]).slice((e.argv as string[]).indexOf('--') + 1)

@@ -122,9 +122,10 @@ const PATH_CHAR = /[\p{L}\p{N}\p{M}._~+@/-]/u // letters of any script continue 
 export function namedWorktrees(prompt: string, roots: readonly string[]): string[] {
   const named = (root: string) => {
     for (let i = prompt.indexOf(root); i >= 0; i = prompt.indexOf(root, i + 1)) {
-      const before = prompt[i - 1]
-      const rest = prompt.slice(i + root.length)
-      const after = rest[0] === '.' && !PATH_CHAR.test(rest[1] ?? ' ') ? ' ' : rest[0] ?? ' '
+      // Whole characters, not UTF-16 units: a letter outside the basic plane is a surrogate pair.
+      const before = Array.from(prompt.slice(Math.max(0, i - 2), i)).at(-1)
+      const [a0, a1] = Array.from(prompt.slice(i + root.length, i + root.length + 4))
+      const after = a0 === '.' && !PATH_CHAR.test(a1 ?? ' ') ? ' ' : a0 ?? ' '
       if ((before === undefined || !PATH_CHAR.test(before)) && (after === '/' || !PATH_CHAR.test(after))) return true
     }
     return false
