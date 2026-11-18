@@ -46,11 +46,16 @@ test('dw58_task_stop_on_an_ended_run_whose_message_waits_answers_at_once', async
   expect(answer.deny).toContain('is not running; it already ended')
 })
 
-for (const [id, over] of [['this_session', {}], ['another_session_past_the_bound', { sessionId: 'other', startedAt: NOW - 60 * 60_000 }]] as const) {
-  test(`dw58_a_leftover_record_whose_launch_has_an_outcome_in_the_log_is_dropped_quietly_${id}`, async ($, on) => {
+const ENDED: [string, Record<string, unknown>, Record<string, unknown>][] = [
+  ['this_session', {}, { agentId: 'codex-123' }],
+  ['another_session_past_the_bound', { sessionId: 'other', startedAt: NOW - 60 * 60_000 }, { agentId: 'codex-123' }],
+  ['row_without_an_id_from_an_older_version', {}, {}],
+]
+for (const [id, over, row] of ENDED) {
+  test(`dw58_a_leftover_record_whose_run_has_an_outcome_in_the_log_is_dropped_quietly_${id}`, async ($, on) => {
     const rec = record(over)
     const w = world(on, { 'run/codex-123': rec })
-    w.files.set(LOG, `${JSON.stringify({ ...rec.entry, outcome: 'ok', durationMs: 36_000 })}\n`)
+    w.files.set(LOG, `${JSON.stringify({ ...rec.entry, ...row, outcome: 'ok', durationMs: 36_000 })}\n`)
     await startSession($)
     await settleReal(() => runKeys(w).length === 0, 500)
     expect(runKeys(w)).toEqual([])
@@ -60,24 +65,43 @@ for (const [id, over] of [['this_session', {}], ['another_session_past_the_bound
   })
 }
 
-test('dw59_an_outcome_row_of_another_launch_does_not_clear_the_record', async ($, on) => {
+test('dw59_an_outcome_row_of_another_run_does_not_clear_the_record', async ($, on) => {
   const w = world(on, { 'run/codex-123': record() })
   w.files.set(LOG, [
-    JSON.stringify({ ...entry, t: entry.t + 1, outcome: 'ok' }), // same session, another launch
-    JSON.stringify({ ...entry, session: 'other', outcome: 'ok' }), // same moment, another session
+    JSON.stringify({ ...entry, agentId: 'codex-999', outcome: 'ok' }), // launched in the same millisecond of this session
+    JSON.stringify({ ...entry, t: entry.t + 1, outcome: 'ok' }), // an older row of another launch
+    JSON.stringify({ ...entry, session: 'other', outcome: 'ok' }), // the same moment in another session
   ].join('\n') + '\n')
   await startSession($)
-  expect(logLines(w).map(l => l.outcome)).toEqual(['ok', 'ok', 'lost'])
+  expect(logLines(w).map(l => l.outcome)).toEqual(['ok', 'ok', 'ok', 'lost'])
   expect(lostSubmits(w)).toHaveLength(1)
 })
 
-test('dw58_ended_launches_are_the_session_and_time_of_rows_with_an_outcome_other_than_lost', () => {
+test('dw58_task_stop_on_a_leftover_record_whose_run_has_an_outcome_says_it_ended', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record() })
+  w.files.set(LOG, `${JSON.stringify({ ...entry, agentId: 'codex-123', outcome: 'ok' })}\n`)
+  const r: any = await $.tool.call({ tool: 'TaskStop', task_id: 'codex-123' } as any)
+  expect(r.deny).toContain('is not running; it already ended')
+  expect(logLines(w).map(l => l.outcome)).toEqual(['ok'])
+  expect(kills(w)).toEqual([])
+  expect(runKeys(w)).toEqual([])
+})
+
+test('dw58_a_codex_run_logs_its_agent_id', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  const r: any = await $.tool.call(agent() as any)
+  expect(logLines(w).map(l => l.agentId)).toEqual([r.result.agentId])
+})
+
+test('dw58_ended_launches_are_run_ids_or_for_older_rows_session_and_time_with_an_outcome_other_than_lost', () => {
   const row = (o: Record<string, unknown>) => JSON.stringify({ ...entry, ...o })
   const text = [
     row({ t: 1, outcome: 'ok' }), row({ t: 2, outcome: 'blocked' }), row({ t: 3, outcome: 'lost' }), row({ t: 4 }),
     row({ t: 5, session: 'other', outcome: 'failed' }), 'not json', '',
   ].join('\n')
-  expect([...balance.endedLaunches(text)].sort()).toEqual(['other 5', `${SID} 1`, `${SID} 2`].sort())
+  const got = balance.endedLaunches(`${text}\n${row({ t: 6, agentId: 'codex-a', outcome: 'ok' })}\n${row({ t: 7, agentId: 'codex-b', outcome: 'lost' })}`)
+  expect([...got.legacy].sort()).toEqual(['other 5', `${SID} 1`, `${SID} 2`].sort())
+  expect([...got.ids]).toEqual(['codex-a'])
 })
 
 // ---------- dw59: a run that really died is still reported once ----------
@@ -123,8 +147,19 @@ test('dw60_an_orphaned_codex_child_is_still_stopped_and_reported_lost', async ($
   expect(lostSubmits(w)).toHaveLength(1)
 })
 
-test('dw60_a_process_whose_parent_cannot_be_read_counts_as_not_running_elsewhere', async ($, on) => {
+test('dw60_a_running_codex_process_whose_parent_cannot_be_read_is_left_alone', async ($, on) => {
   const w = world(on, { 'run/codex-123': record() }, { codexPids: '4242' } as any)
   await startSession($)
-  expect(lostSubmits(w)).toHaveLength(1)
+  expect(kills(w)).toEqual([])
+  expect(lostSubmits(w)).toEqual([])
+  expect(runKeys(w)).toEqual(['run/codex-123'])
+})
+
+test('dw60_another_sessions_expired_record_whose_run_another_live_process_runs_is_left_alone', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record({ sessionId: 'other', startedAt: NOW - 60 * 60_000 }) }, { codexPids: '4242' } as any)
+  w.ppids.set('4242', '777')
+  await startSession($)
+  expect(kills(w)).toEqual([])
+  expect(logLines(w)).toEqual([])
+  expect(runKeys(w)).toEqual(['run/codex-123'])
 })

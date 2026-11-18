@@ -23,8 +23,9 @@ export function isBlocked(finalMessage: string): boolean {
 
 /** Codex's one-line reason from a `BLOCKED:` first line, cut to 200 characters; none for a `Status: blocked` match. */
 export function blockedReason(finalMessage: string): string | undefined {
-  const first = finalMessage.split('\n').find(l => l.trim() !== '')?.replace(/[*_`]/g, '').replace(/^[#>\-\s]+/, '') ?? ''
-  const m = /^blocked\s*:(.*)$/i.exec(first)
+  // Emphasis and heading marks around the marker are dropped; the reason keeps its own characters (say `required_key`).
+  const first = finalMessage.split('\n').find(l => l.trim() !== '') ?? ''
+  const m = /^[#>\-\s]*[*_`]*\s*blocked\s*[*_`]*\s*:\s*[*_`]*(.*)$/i.exec(first)
   const reason = m?.[1]!.replace(/\s+/g, ' ').trim()
   if (!reason) return undefined
   const chars = [...reason]

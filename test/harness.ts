@@ -205,7 +205,8 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
     if (a === 'pkill') return { value: { exitCode: w.pkillFinds ? 0 : 1, stdout: '', stderr: '' } }
     if (a === 'pgrep') return { value: { exitCode: w.codexPids ? 0 : 1, stdout: w.codexPids ? `${w.codexPids}\n` : '', stderr: '' } }
     if (a === 'ps') {
-      const ppid = w.ppids.get(e.argv[e.argv.length - 1])
+      if (e.argv.length !== 5 || e.argv.slice(1, 4).join(' ') !== '-o ppid= -p') throw new Error('unexpected ps ' + e.argv.join(' '))
+      const ppid = w.ppids.get(e.argv[4])
       return { value: { exitCode: ppid ? 0 : 1, stdout: ppid ? `  ${ppid}\n` : '', stderr: '' } }
     }
     if (a === 'tail') return { value: { exitCode: w.rollout === null ? 1 : 0, stdout: w.rollout ?? '', stderr: '' } }

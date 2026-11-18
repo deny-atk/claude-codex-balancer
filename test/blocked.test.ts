@@ -264,6 +264,8 @@ const REASONS: [string, string, string | undefined][] = [
   ['plain', 'BLOCKED: sandbox refused the write\nmore', 'sandbox refused the write'],
   ['bold_marker', '**BLOCKED:** the plan reads the wrong JSON path', 'the plan reads the wrong JSON path'],
   ['heading_and_blank_lines', '\n\n## Blocked:   two   spaces\tand a tab\n', 'two spaces and a tab'],
+  ['keeps_its_own_underscores_and_backticks', 'BLOCKED: missing `required_key` in *config*', 'missing `required_key` in *config*'],
+  ['bold_word_then_colon', '**BLOCKED**: the fixture is outside my files', 'the fixture is outside my files'],
   ['status_line_only', '# Report\nStatus: blocked\nDetails.', undefined],
   ['empty_reason', 'BLOCKED:\nI stopped.', undefined],
   ['not_blocked', 'All done.', undefined],

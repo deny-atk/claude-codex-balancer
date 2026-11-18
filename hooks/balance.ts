@@ -19,6 +19,7 @@ export type DecisionEntry = {
   estimate: Cost
   mode: Mode
   codexModel?: string
+  agentId?: string // a Codex run's id: tells which launch an outcome belongs to
   durationMs?: number
   outcome?: string
   exitCode?: number
@@ -59,9 +60,18 @@ export function lastDecisions(text: string, max = RECENT_MAX): DecisionEntry[] {
   return out.slice(-max)
 }
 
-/** `<session> <t>` of each launch whose Codex run the log already gives an outcome other than `lost`: it ended. */
-export function endedLaunches(text: string): Set<string> {
-  return new Set(lastDecisions(text, Infinity).filter(d => d.outcome !== undefined && d.outcome !== 'lost').map(d => `${d.session} ${d.t}`))
+/**
+ * Codex runs the log already gives an outcome other than `lost`: they ended. Keyed by `agentId`; a row written before
+ * rows carried it (0.2.13 and earlier) is keyed by `<session> <t>` in `legacy`.
+ */
+export function endedLaunches(text: string): { ids: Set<string>; legacy: Set<string> } {
+  const out = { ids: new Set<string>(), legacy: new Set<string>() }
+  for (const d of lastDecisions(text, Infinity)) {
+    if (d.outcome === undefined || d.outcome === 'lost') continue
+    if (typeof d.agentId === 'string') out.ids.add(d.agentId)
+    else out.legacy.add(`${d.session} ${d.t}`)
+  }
+  return out
 }
 
 export type BalanceArgs = { kind: 'show' } | { kind: 'set'; mode: Mode } | { kind: 'usage' }
