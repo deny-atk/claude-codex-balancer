@@ -175,6 +175,32 @@ test('dw60_an_orphaned_codex_child_is_still_stopped_and_reported_lost', async ($
   expect(lostSubmits(w)).toHaveLength(1)
 })
 
+const LAUNCHER: [string, string, number][] = [
+  ['orphaned', '1', 1], // the launcher's Claude process died
+  ['under_a_live_process', '777', 0], // another open copy of the session runs it
+]
+for (const [id, launcherParent, reported] of LAUNCHER) {
+  test(`dw59_dw60_a_codex_binary_under_its_launcher_is_judged_by_the_launcher_${id}`, async ($, on) => {
+    // An npm install runs the native binary under a Node launcher; both command lines match the run's pattern.
+    const w = world(on, { 'run/codex-123': record() }, { codexPids: '4243\n4242' } as any)
+    w.ppids.set('4242', launcherParent)
+    w.ppids.set('4243', '4242')
+    const started = startSession($)
+    if (reported) { await settleReal(() => kills(w).length > 0); await w.clock.advance(1000) }
+    await started
+    expect(lostSubmits(w)).toHaveLength(reported)
+    expect(kills(w).length > 0).toBe(reported > 0)
+  })
+}
+
+test('dw60_a_run_whose_codex_process_is_not_found_is_reported_lost_but_nothing_is_signalled', async ($, on) => {
+  // Another open copy of the session may be about to start it: its record is stored a moment before the process.
+  const w = world(on, { 'run/codex-123': record() })
+  await startSession($)
+  expect(lostSubmits(w)).toHaveLength(1)
+  expect(kills(w)).toEqual([])
+})
+
 test('dw60_a_running_codex_process_whose_parent_cannot_be_read_is_left_alone', async ($, on) => {
   const w = world(on, { 'run/codex-123': record() }, { codexPids: '4242' } as any)
   await startSession($)

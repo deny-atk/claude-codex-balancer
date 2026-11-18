@@ -177,7 +177,7 @@ type Lost = { agentId: string; text?: string } // text: what the calling session
 
 // Releases the reservation, logs outcome lost and builds the caller's message. The record stays: the caller deletes it
 // once the message is delivered (a duplicate on a crash beats a dropped message). `signal` false skips the stop: the
-// process check could not tell whose a running child is.
+// process check found no orphaned Codex process, or could not tell.
 async function lostRun($: EngineInterface, st: State, record: RunRecord, current: boolean, signal = true): Promise<Lost> {
   st.reconciling.add(record.agentId)
   await quietly(() => removeInflight($, record.agentId))
@@ -219,9 +219,11 @@ const codexPattern = (agentId: string) => `codex exec .* -o .*/${agentId}\\.last
 
 // A Codex process is the child of the Claude process that started it; one whose Claude process died is adopted by
 // pid 1. A run still running under another live Claude process belongs to another open copy of this session (a resume
-// keeps the session id), so it is not lost. A running process whose parent cannot be read is left alone too. When pgrep
-// cannot answer (exit code other than 0 or 1, or it cannot run), the run is still reported lost but nothing is signalled.
-async function codexOwner($: EngineInterface, agentId: string): Promise<'elsewhere' | 'none' | 'unknown'> {
+// keeps the session id), so it is not lost. A matched process whose parent is another matched one (an npm install's
+// native binary under its Node launcher) is judged by that parent. A running process whose parent cannot be read is
+// left alone too. Only 'orphaned' leads to a stop signal: with no process found (one may be about to start in another
+// copy) or a pgrep that cannot answer, the run is still reported lost but nothing is signalled.
+async function codexOwner($: EngineInterface, agentId: string): Promise<'elsewhere' | 'orphaned' | 'none' | 'unknown'> {
   let pids: string[]
   try {
     const r = await $.process.run(['pgrep', '-f', codexPattern(agentId)])
@@ -229,13 +231,17 @@ async function codexOwner($: EngineInterface, agentId: string): Promise<'elsewhe
     if (r.exitCode !== 0) return 'unknown'
     pids = r.stdout.split(/\s+/).filter(Boolean)
   } catch { return 'unknown' }
+  let orphaned = false
   for (const pid of pids) {
     try {
       const p = await $.process.run(['ps', '-o', 'ppid=', '-p', pid])
-      if (p.exitCode !== 0 || p.stdout.trim() !== '1') return 'elsewhere'
+      const ppid = p.stdout.trim()
+      if (p.exitCode !== 0) return 'elsewhere'
+      if (ppid === '1') orphaned = true
+      else if (!pids.includes(ppid)) return 'elsewhere'
     } catch { return 'elsewhere' }
   }
-  return 'none'
+  return orphaned ? 'orphaned' : 'none'
 }
 
 // True when the log already gives this run an outcome: it ended, and its record only outlived its delivery.
@@ -282,7 +288,7 @@ async function findLost($: EngineInterface, st: State): Promise<Lost[]> {
         // Read both again: another instance may have finished the run since the log was read.
         if (!(await $.store.get(key))) return
         if (await launchEnded($, st, record)) return dropRecord($, record.agentId)
-        out.push(await lostRun($, st, record, current, owner === 'none'))
+        out.push(await lostRun($, st, record, current, owner === 'orphaned'))
       })
     }
   })
@@ -962,7 +968,7 @@ export async function onTaskStop($: EngineInterface, st: State, e: TaskStopCall,
     }
     if (record?.agentId === id && !st.reconciling.has(id)) {
       // The run died with an earlier module instance; the answer itself tells the model, so no prompt is submitted.
-      const lost = await lostRun($, st, record, true, owner === 'none')
+      const lost = await lostRun($, st, record, true, owner === 'orphaned')
       await dropRecord($, id)
       const stopped = taskStopRecord({ taskId: id, description: record.description })
       return { result: lost.text ? { ...stopped, message: lost.text } : stopped }

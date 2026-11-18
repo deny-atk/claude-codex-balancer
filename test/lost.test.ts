@@ -175,7 +175,8 @@ test('dw44_task_stop_on_another_id_goes_to_the_engine', async ($, on) => {
 })
 
 test('dw42_a_codex_child_that_outlived_its_process_is_stopped_before_the_change_check', async ($, on) => {
-  const w = world(on, { 'run/codex-123': record() }, { pkillFinds: true } as any)
+  const w = world(on, { 'run/codex-123': record() }, { pkillFinds: true, codexPids: '4242' } as any)
+  w.ppids.set('4242', '1') // its Claude process died: launchd adopted it
   const started = startSession($)
   await settleReal(() => w.processCalls.some((c: string[]) => c[0] === 'pkill'))
   await w.clock.advance(1000) // the wait for the stopped child to exit
