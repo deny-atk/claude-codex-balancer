@@ -2,7 +2,7 @@
 // record whose launch already has an outcome in the log is dropped quietly, and a run another live process of the same
 // session still runs is left alone.
 import { test, expect } from 'claude-code/testing'
-import { endedLaunches } from '../hooks/balance'
+import * as balance from '../hooks/balance'
 import { CODEX_AHEAD, DATA, NOW, SID, agent, logLines, settleReal, startSession, world } from './harness'
 
 const entry = { t: NOW - 60_000, session: SID, agentType: 'Explore', route: 'codex', reason: 'codex-ahead', claudeAfter: 1, codexAfter: 2, estimate: { fiveHour: 1, sevenDay: 1 }, mode: 'auto' }
@@ -77,7 +77,7 @@ test('dw58_ended_launches_are_the_session_and_time_of_rows_with_an_outcome_other
     row({ t: 1, outcome: 'ok' }), row({ t: 2, outcome: 'blocked' }), row({ t: 3, outcome: 'lost' }), row({ t: 4 }),
     row({ t: 5, session: 'other', outcome: 'failed' }), 'not json', '',
   ].join('\n')
-  expect([...endedLaunches(text)].sort()).toEqual(['other 5', `${SID} 1`, `${SID} 2`].sort())
+  expect([...balance.endedLaunches(text)].sort()).toEqual(['other 5', `${SID} 1`, `${SID} 2`].sort())
 })
 
 // ---------- dw59: a run that really died is still reported once ----------
