@@ -163,6 +163,8 @@ Limits:
 - A background result whose module dies after Codex ended but before the message entered is not replayed; an `ok` report stays in its output file.
 - The check of a run's outcome reads the decision log, which keeps 2000 lines and may lose a line to concurrent sessions; a record whose outcome row is gone is reported lost as before. A record left by 0.2.13 or earlier is matched by session and launch time, so another run launched in the same millisecond of that session could hide it.
 - A run whose Codex process keeps running after its own Claude process has a new parent other than pid 1 (say, a process manager that adopts orphans) is never reported lost.
+- A run record is stored a moment before its Codex process starts. If another open copy of the same session checks its leftover records in that moment, it finds no process, reports the run lost and may stop the process that starts right after.
+- Session end does not wait for a background message that is still waiting for an idle session, nor for a Claude redo being set up; a redo's reservation set up after session end ages out after `taskTimeoutMinutes`.
 - What a foreground call returns when its module is unloaded mid-run is up to the engine.
 
 ## TaskStop, interrupts and session end

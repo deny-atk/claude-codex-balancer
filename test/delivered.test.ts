@@ -33,6 +33,34 @@ test('dw58_a_background_run_whose_message_cannot_be_delivered_leaves_no_record',
   expect(runKeys(w)).toEqual([])
 })
 
+const OUTCOMES: [string, Record<string, unknown>, string][] = [
+  ['blocked', { finalText: 'BLOCKED: sandbox refused the write\nnotes' }, 'blocked'],
+  ['failed', { script: 'fail' }, 'failed'],
+]
+for (const [id, opts, outcome] of OUTCOMES) {
+  test(`dw58_a_background_run_that_ended_${id}_leaves_no_record_while_its_message_waits`, async ($, on) => {
+    const w = world(on, CODEX_AHEAD, opts as any)
+    w.submitGate = never
+    await $.tool.call(agent({ run_in_background: true }) as any)
+    await settleReal(() => w.spawnFinally > 0, 500)
+    await settleReal(() => runKeys(w).length === 0, 500)
+    expect(runKeys(w)).toEqual([])
+    expect(logLines(w).map(l => l.outcome)).toEqual([outcome])
+  })
+}
+
+test('dw58_session_end_does_not_wait_for_a_message_that_waits_for_an_idle_session', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  w.submitGate = never
+  await $.tool.call(agent({ run_in_background: true }) as any)
+  await settleReal(() => w.spawnFinally > 0, 500)
+  await settleReal(() => runKeys(w).length === 0, 500)
+  let ended = false
+  void $.session.end({ reason: 'other', sessionId: SID, resume: { id: SID } } as any).then(() => { ended = true })
+  await settleReal(() => ended, 300)
+  expect(ended).toBe(true)
+})
+
 test('dw58_task_stop_on_an_ended_run_whose_message_waits_answers_at_once', async ($, on) => {
   const w = world(on, CODEX_AHEAD)
   w.submitGate = never
