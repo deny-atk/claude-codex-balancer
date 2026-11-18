@@ -284,6 +284,11 @@ test('dw61_a_long_reason_is_cut_to_200_characters_by_code_point', () => {
   expect(codex.blockedReason(`BLOCKED: ${'a'.repeat(200)}`)).toBe('a'.repeat(200))
 })
 
+test('dw61_a_long_reason_keeps_its_first_200_code_points', () => {
+  const chars = Array.from({ length: 260 }, (_, i) => String.fromCodePoint(0x10400 + i)) // all distinct
+  expect(codex.blockedReason(`BLOCKED: ${chars.join('')}`)).toBe(`${chars.slice(0, 200).join('')}…`)
+})
+
 test('dw61_a_status_blocked_run_gets_the_message_without_a_reason', async () => {
   const d = driven(false, '# Report\nStatus: blocked\nI stopped.')
   const codexId = await d.launch()
