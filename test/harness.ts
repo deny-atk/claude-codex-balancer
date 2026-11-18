@@ -81,6 +81,9 @@ export type World = {
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
   submitFails?: boolean // a prompt.submit reaching the bottom throws
   pkillFinds?: boolean // `pkill` reports that it signalled a process
+  codexPids?: string // what `pgrep -f` prints for a run's Codex process; absent = none running; 'THROW' = cannot run; 'ERROR' = exits 2
+  onPgrep?: () => void // runs when `pgrep` is asked: another instance finishing the run meanwhile
+  ppids: Map<string, string> // `ps -o ppid= -p <pid>`: a process's parent pid
   submitGate?: Promise<void> // a prompt.submit reaching the bottom waits for this: the prompt has not entered yet
   state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
   modelCalls: string[] // model.complete / classify / fork that reached the bottom: the mod must make none
@@ -121,7 +124,7 @@ export const rolloutFor = (fiveUsed: number) =>
 export function world(on: any, seed: Record<string, unknown> = {}, over: Partial<World> = {}): World {
   const w: World = {
     store: new Map(Object.entries(seed)), files: new Map(), writes: [], toasts: [], submits: [], agentCalls: [], agentSpawns: [], stopCalls: [],
-    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(), sizes: new Map(), links: new Map(), reads: [],
+    claudeResult: CLAUDE_MARK, processCalls: [], spawns: [], spawnFinally: 0, script: 'ok', finalText: CODEX_TEXT, failMessage: 'boom', cwdExists: true, root: CWD, loggedIn: true, loginThrows: false, work: new Map(), tracked: new Set(), diff: '', gitCalls: [], gitCwds: [], cwd: CWD, toplevel: CWD, commonDir: `${CWD}/.git`, dirs: new Set(), fileStats: new Set(), sizes: new Map(), links: new Map(), reads: [], ppids: new Map(),
     gate: undefined as any, openGate: () => {},
     git: [''], gitAt: new Map(), worktrees: '', worktreeCwds: [], diffAt: new Map(), lsFailAt: new Set(), sid: SID, rollout: null, usage: [], loginChecks: 0, failWrites: false, hashFail: new Set(), failStoreWrites: false,
     statuses: [], contexts: [], state: new Map(), modelCalls: [], toolOps: [], compose: 0, commands: [], clock: undefined as any, ...over,
@@ -201,6 +204,16 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
       return { value: { exitCode: out === null ? 128 : 0, stdout: out ?? '', stderr: '' } }
     }
     if (a === 'pkill') return { value: { exitCode: w.pkillFinds ? 0 : 1, stdout: '', stderr: '' } }
+    if (a === 'pgrep') w.onPgrep?.()
+    if (a === 'pgrep' && w.codexPids === 'THROW') throw new Error('spawn pgrep ENOENT')
+    if (a === 'pgrep' && w.codexPids === 'ERROR') return { value: { exitCode: 2, stdout: '', stderr: 'pgrep: error' } }
+    if (a === 'pgrep') return { value: { exitCode: w.codexPids ? 0 : 1, stdout: w.codexPids ? `${w.codexPids}\n` : '', stderr: '' } }
+    if (a === 'ps') {
+      if (e.argv.length !== 5 || e.argv.slice(1, 4).join(' ') !== '-o ppid= -p') throw new Error('unexpected ps ' + e.argv.join(' '))
+      const ppid = w.ppids.get(e.argv[4])
+      if (ppid === 'THROW') throw new Error('spawn ps ENOENT')
+      return { value: { exitCode: ppid ? 0 : 1, stdout: ppid ? `  ${ppid}\n` : '', stderr: '' } }
+    }
     if (a === 'tail') return { value: { exitCode: w.rollout === null ? 1 : 0, stdout: w.rollout ?? '', stderr: '' } }
     if (a === 'sh') return { value: { exitCode: 1, stdout: '', stderr: '' } } // app server: no answer
     throw new Error('unexpected process.run ' + String(a))

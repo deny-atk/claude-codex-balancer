@@ -464,7 +464,7 @@ test('dw11_log_lines_hold_no_prompt_description_or_report_text', async ($, on) =
   expect(ls).toHaveLength(2)
   expect(ls[0]).toMatchObject({ t: NOW, session: SID, agentType: 'Explore', route: 'codex', reason: 'codex-ahead', mode: 'auto', outcome: 'ok', exitCode: 0 })
   expect(Object.keys(ls[0]).sort()).toEqual(
-    ['agentType', 'claudeAfter', 'codexAfter', 'codexModel', 'durationMs', 'estimate', 'exitCode', 'mode', 'outcome', 'reason', 'route', 'session', 't'])
+    ['agentId', 'agentType', 'claudeAfter', 'codexAfter', 'codexModel', 'durationMs', 'estimate', 'exitCode', 'mode', 'outcome', 'reason', 'route', 'session', 't'])
   expect(ls[1]).toMatchObject({ route: 'claude', reason: 'mode-claude', mode: 'claude' })
 })
 

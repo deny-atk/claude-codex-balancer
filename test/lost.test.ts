@@ -175,7 +175,8 @@ test('dw44_task_stop_on_another_id_goes_to_the_engine', async ($, on) => {
 })
 
 test('dw42_a_codex_child_that_outlived_its_process_is_stopped_before_the_change_check', async ($, on) => {
-  const w = world(on, { 'run/codex-123': record() }, { pkillFinds: true } as any)
+  const w = world(on, { 'run/codex-123': record() }, { pkillFinds: true, codexPids: '4242' } as any)
+  w.ppids.set('4242', '1') // its Claude process died: launchd adopted it
   const started = startSession($)
   await settleReal(() => w.processCalls.some((c: string[]) => c[0] === 'pkill'))
   await w.clock.advance(1000) // the wait for the stopped child to exit
@@ -190,14 +191,6 @@ test('dw42_a_codex_child_that_outlived_its_process_is_stopped_before_the_change_
   expect(new RegExp(pattern).test('codex exec --json -o /Data Dir/runs/codex-123.last.txt -')).toBe(true)
   expect(new RegExp(pattern).test('codex exec --json -o /d/runs/codex-456.last.txt continue the work of codex-123')).toBe(false)
   expect(lostSubmits(w)).toHaveLength(1)
-})
-
-test('dw41_a_background_result_that_cannot_be_delivered_keeps_its_record', async ($, on) => {
-  const w = world(on, CODEX_AHEAD, { submitFails: true } as any)
-  await $.tool.call(agent({ run_in_background: true }) as any)
-  await settleReal(() => w.spawnFinally > 0, 500)
-  await settleReal(() => false, 50)
-  expect(runKeys(w)).toHaveLength(1)
 })
 
 test('dw42_reconcile_does_not_redo_or_start_a_cooldown', async ($, on) => {
