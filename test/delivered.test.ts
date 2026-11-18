@@ -174,11 +174,39 @@ test('dw60_a_ps_that_cannot_run_leaves_the_running_process_alone', async ($, on)
   expect(lostSubmits(w)).toEqual([])
 })
 
-test('dw59_a_pgrep_that_cannot_run_still_reports_the_run_lost', async ($, on) => {
+for (const pids of ['THROW', 'ERROR']) {
+  test(`dw60_a_pgrep_that_cannot_answer_still_reports_the_run_lost_but_stops_nothing_${pids.toLowerCase()}`, async ($, on) => {
+    const w = world(on, { 'run/codex-123': record() }, { codexPids: pids } as any)
+    await startSession($)
+    expect(lostSubmits(w)).toHaveLength(1)
+    expect(logLines(w).map(l => l.outcome)).toEqual(['lost'])
+    expect(kills(w)).toEqual([])
+  })
+}
+
+test('dw60_task_stop_when_pgrep_cannot_answer_reports_the_run_lost_but_stops_nothing', async ($, on) => {
   const w = world(on, { 'run/codex-123': record() }, { codexPids: 'THROW' } as any)
-  await startSession($)
-  expect(lostSubmits(w)).toHaveLength(1)
+  const r: any = await $.tool.call({ tool: 'TaskStop', task_id: 'codex-123' } as any)
+  expect(r.result.message).toContain('ended without a result')
+  expect(kills(w)).toEqual([])
+  expect(runKeys(w)).toEqual([])
 })
+
+const FINISHED_DURING_STOP: [string, (w: any) => void][] = [
+  ['record_deleted_and_logged', w => { w.files.set(LOG, `${JSON.stringify({ ...entry, agentId: 'codex-123', outcome: 'ok' })}\n`); w.store.delete('run/codex-123') }],
+  ['logged_only', w => { w.files.set(LOG, `${JSON.stringify({ ...entry, agentId: 'codex-123', outcome: 'ok' })}\n`) }],
+]
+for (const [id, finish] of FINISHED_DURING_STOP) {
+  test(`dw58_task_stop_on_a_run_another_instance_finishes_during_the_check_says_it_ended_${id}`, async ($, on) => {
+    const w = world(on, { 'run/codex-123': record() })
+    w.onPgrep = () => finish(w)
+    const r: any = await $.tool.call({ tool: 'TaskStop', task_id: 'codex-123' } as any)
+    expect(r.deny).toContain('is not running; it already ended')
+    expect(logLines(w).map(l => l.outcome)).toEqual(['ok'])
+    expect(kills(w)).toEqual([])
+    expect(runKeys(w)).toEqual([])
+  })
+}
 
 test('dw58_a_run_another_instance_finishes_during_the_check_is_not_reported_lost', async ($, on) => {
   const w = world(on, { 'run/codex-123': record() })

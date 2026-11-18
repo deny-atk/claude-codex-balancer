@@ -176,14 +176,15 @@ export async function pruneRuns($: EngineInterface, st: State): Promise<void> {
 type Lost = { agentId: string; text?: string } // text: what the calling session must be told (its own runs only)
 
 // Releases the reservation, logs outcome lost and builds the caller's message. The record stays: the caller deletes it
-// once the message is delivered (a duplicate on a crash beats a dropped message).
-async function lostRun($: EngineInterface, st: State, record: RunRecord, current: boolean): Promise<Lost> {
+// once the message is delivered (a duplicate on a crash beats a dropped message). `signal` false skips the stop: the
+// process check could not tell whose a running child is.
+async function lostRun($: EngineInterface, st: State, record: RunRecord, current: boolean, signal = true): Promise<Lost> {
   st.reconciling.add(record.agentId)
   await quietly(() => removeInflight($, record.agentId))
   await quietly(() => writeLog($, st, { ...record.entry, outcome: 'lost' }))
   // A reload kills the Codex child, but a killed Claude Code process leaves it running (seen live): stop it before the
   // change check. The pattern matches only a codex exec whose -o file is this run's, not a prompt naming its id.
-  await quietly(async () => {
+  if (signal) await quietly(async () => {
     const pattern = codexPattern(record.agentId)
     const r = await $.process.run(['pkill', '-f', pattern])
     if (r.exitCode !== 0) return
@@ -218,22 +219,23 @@ const codexPattern = (agentId: string) => `codex exec .* -o .*/${agentId}\\.last
 
 // A Codex process is the child of the Claude process that started it; one whose Claude process died is adopted by
 // pid 1. A run still running under another live Claude process belongs to another open copy of this session (a resume
-// keeps the session id), so it is not lost. A running process whose parent cannot be read is left alone too; only a
-// pgrep that cannot run at all falls back to treating the run as lost.
-async function runningElsewhere($: EngineInterface, agentId: string): Promise<boolean> {
+// keeps the session id), so it is not lost. A running process whose parent cannot be read is left alone too. When pgrep
+// cannot answer (exit code other than 0 or 1, or it cannot run), the run is still reported lost but nothing is signalled.
+async function codexOwner($: EngineInterface, agentId: string): Promise<'elsewhere' | 'none' | 'unknown'> {
   let pids: string[]
   try {
     const r = await $.process.run(['pgrep', '-f', codexPattern(agentId)])
-    if (r.exitCode !== 0) return false
+    if (r.exitCode === 1) return 'none'
+    if (r.exitCode !== 0) return 'unknown'
     pids = r.stdout.split(/\s+/).filter(Boolean)
-  } catch { return false }
+  } catch { return 'unknown' }
   for (const pid of pids) {
     try {
       const p = await $.process.run(['ps', '-o', 'ppid=', '-p', pid])
-      if (p.exitCode !== 0 || p.stdout.trim() !== '1') return true
-    } catch { return true }
+      if (p.exitCode !== 0 || p.stdout.trim() !== '1') return 'elsewhere'
+    } catch { return 'elsewhere' }
   }
-  return false
+  return 'none'
 }
 
 // True when the log already gives this run an outcome: it ended, and its record only outlived its delivery.
@@ -275,11 +277,12 @@ async function findLost($: EngineInterface, st: State): Promise<Lost[]> {
         if (await launchEnded($, st, record, ended)) return dropRecord($, record.agentId)
         const current = record.sessionId === session
         if (!current && now - record.startedAt <= st.opts.taskTimeoutMs + 5 * MIN_MS) return
-        if (await runningElsewhere($, record.agentId)) return
+        const owner = await codexOwner($, record.agentId)
+        if (owner === 'elsewhere') return
         // Read both again: another instance may have finished the run since the log was read.
         if (!(await $.store.get(key))) return
         if (await launchEnded($, st, record)) return dropRecord($, record.agentId)
-        out.push(await lostRun($, st, record, current))
+        out.push(await lostRun($, st, record, current, owner === 'none'))
       })
     }
   })
@@ -948,12 +951,18 @@ export async function onTaskStop($: EngineInterface, st: State, e: TaskStopCall,
       await dropRecord($, id)
       return { deny: `Balancer: Codex run ${id} is not running; it already ended. Its result, if any, was delivered as a message.` }
     }
-    if (record?.agentId === id && await runningElsewhere($, id)) {
+    const owner = record?.agentId === id ? await codexOwner($, id) : 'none'
+    if (owner === 'elsewhere') {
       return { deny: `Balancer: Codex run ${id} is running in another open copy of this session; only that copy can stop it.` }
+    }
+    // Read both again: another instance may have finished the run during the process check.
+    if (record?.agentId === id && !st.reconciling.has(id) && (!(await $.store.get(`run/${id}`)) || await launchEnded($, st, record))) {
+      await dropRecord($, id)
+      return { deny: `Balancer: Codex run ${id} is not running; it already ended. Its result, if any, was delivered as a message.` }
     }
     if (record?.agentId === id && !st.reconciling.has(id)) {
       // The run died with an earlier module instance; the answer itself tells the model, so no prompt is submitted.
-      const lost = await lostRun($, st, record, true)
+      const lost = await lostRun($, st, record, true, owner === 'none')
       await dropRecord($, id)
       const stopped = taskStopRecord({ taskId: id, description: record.description })
       return { result: lost.text ? { ...stopped, message: lost.text } : stopped }
