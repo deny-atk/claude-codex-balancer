@@ -25,8 +25,11 @@ export function isBlocked(finalMessage: string): boolean {
 export function blockedReason(finalMessage: string): string | undefined {
   // Emphasis and heading marks around the marker are dropped; the reason keeps its own characters (say `required_key`).
   const first = finalMessage.split('\n').find(l => l.trim() !== '') ?? ''
-  const m = /^[#>\-\s]*[*_`]*\s*blocked\s*[*_`]*\s*:\s*[*_`]*(.*)$/i.exec(first)
-  const reason = m?.[1]!.replace(/\s+/g, ' ').trim()
+  const m = /^[#>\-\s]*([*_`]*)\s*blocked\s*([*_`]*)\s*:\s*(.*)$/i.exec(first)
+  if (!m) return undefined
+  // `**BLOCKED:** x` closes its opening mark after the colon; `**BLOCKED**: x` and `BLOCKED: x` do not.
+  const [, open, closed, rest] = m as unknown as [string, string, string, string]
+  const reason = (open && !closed && rest.startsWith(open) ? rest.slice(open.length) : rest).replace(/\s+/g, ' ').trim()
   if (!reason) return undefined
   const chars = [...reason]
   return chars.length > 200 ? `${chars.slice(0, 200).join('')}…` : reason

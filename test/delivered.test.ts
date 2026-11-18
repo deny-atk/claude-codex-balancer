@@ -155,6 +155,61 @@ test('dw60_a_running_codex_process_whose_parent_cannot_be_read_is_left_alone', a
   expect(runKeys(w)).toEqual(['run/codex-123'])
 })
 
+for (const [id, pids] of [['orphan_first', '4242 4243'], ['live_first', '4243\n4242']] as const) {
+  test(`dw60_of_several_codex_processes_one_under_a_live_process_keeps_the_run_alive_${id}`, async ($, on) => {
+    const w = world(on, { 'run/codex-123': record() }, { codexPids: pids } as any)
+    w.ppids.set('4242', '1')
+    w.ppids.set('4243', '777')
+    await startSession($)
+    expect(kills(w)).toEqual([])
+    expect(lostSubmits(w)).toEqual([])
+  })
+}
+
+test('dw60_a_ps_that_cannot_run_leaves_the_running_process_alone', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record() }, { codexPids: '4242' } as any)
+  w.ppids.set('4242', 'THROW')
+  await startSession($)
+  expect(kills(w)).toEqual([])
+  expect(lostSubmits(w)).toEqual([])
+})
+
+test('dw59_a_pgrep_that_cannot_run_still_reports_the_run_lost', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record() }, { codexPids: 'THROW' } as any)
+  await startSession($)
+  expect(lostSubmits(w)).toHaveLength(1)
+})
+
+test('dw58_a_run_another_instance_finishes_during_the_check_is_not_reported_lost', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record() })
+  w.onPgrep = () => {
+    w.files.set(LOG, `${JSON.stringify({ ...entry, agentId: 'codex-123', outcome: 'ok' })}\n`)
+    w.store.delete('run/codex-123')
+  }
+  await startSession($)
+  expect(logLines(w).map(l => l.outcome)).toEqual(['ok'])
+  expect(w.submits).toEqual([])
+  expect(kills(w)).toEqual([])
+})
+
+test('dw58_a_run_another_instance_logs_during_the_check_is_dropped_quietly', async ($, on) => {
+  const w = world(on, { 'run/codex-123': record() })
+  w.onPgrep = () => { w.files.set(LOG, `${JSON.stringify({ ...entry, agentId: 'codex-123', outcome: 'ok' })}\n`) }
+  await startSession($)
+  expect(logLines(w).map(l => l.outcome)).toEqual(['ok'])
+  expect(w.submits).toEqual([])
+  expect(runKeys(w)).toEqual([])
+})
+
+test('dw58_a_codex_command_run_logs_its_agent_id', async ($, on) => {
+  const w = world(on, CODEX_AHEAD)
+  let id: string | undefined
+  w.during = () => { id = runKeys(w)[0]?.slice('run/'.length) }
+  await $.command.run({ command: 'codex', args: 'list the files' } as any)
+  expect(id).toBeDefined()
+  expect(logLines(w).map(l => l.agentId)).toEqual([id])
+})
+
 test('dw60_another_sessions_expired_record_whose_run_another_live_process_runs_is_left_alone', async ($, on) => {
   const w = world(on, { 'run/codex-123': record({ sessionId: 'other', startedAt: NOW - 60 * 60_000 }) }, { codexPids: '4242' } as any)
   w.ppids.set('4242', '777')

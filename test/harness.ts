@@ -81,7 +81,8 @@ export type World = {
   contexts: (readonly string[] | undefined)[] // `context` of each prompt.submit that reached the bottom
   submitFails?: boolean // a prompt.submit reaching the bottom throws
   pkillFinds?: boolean // `pkill` reports that it signalled a process
-  codexPids?: string // what `pgrep -f` prints for a run's Codex process; absent = none running
+  codexPids?: string // what `pgrep -f` prints for a run's Codex process; absent = none running; 'THROW' = cannot run
+  onPgrep?: () => void // runs when `pgrep` is asked: another instance finishing the run meanwhile
   ppids: Map<string, string> // `ps -o ppid= -p <pid>`: a process's parent pid
   submitGate?: Promise<void> // a prompt.submit reaching the bottom waits for this: the prompt has not entered yet
   state: Map<string, { value: unknown; version: number }> // $.state, keyed plugin/key/id
@@ -203,10 +204,13 @@ export function world(on: any, seed: Record<string, unknown> = {}, over: Partial
       return { value: { exitCode: out === null ? 128 : 0, stdout: out ?? '', stderr: '' } }
     }
     if (a === 'pkill') return { value: { exitCode: w.pkillFinds ? 0 : 1, stdout: '', stderr: '' } }
+    if (a === 'pgrep') w.onPgrep?.()
+    if (a === 'pgrep' && w.codexPids === 'THROW') throw new Error('spawn pgrep ENOENT')
     if (a === 'pgrep') return { value: { exitCode: w.codexPids ? 0 : 1, stdout: w.codexPids ? `${w.codexPids}\n` : '', stderr: '' } }
     if (a === 'ps') {
       if (e.argv.length !== 5 || e.argv.slice(1, 4).join(' ') !== '-o ppid= -p') throw new Error('unexpected ps ' + e.argv.join(' '))
       const ppid = w.ppids.get(e.argv[4])
+      if (ppid === 'THROW') throw new Error('spawn ps ENOENT')
       return { value: { exitCode: ppid ? 0 : 1, stdout: ppid ? `  ${ppid}\n` : '', stderr: '' } }
     }
     if (a === 'tail') return { value: { exitCode: w.rollout === null ? 1 : 0, stdout: w.rollout ?? '', stderr: '' } }

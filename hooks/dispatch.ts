@@ -276,6 +276,9 @@ async function findLost($: EngineInterface, st: State): Promise<Lost[]> {
         const current = record.sessionId === session
         if (!current && now - record.startedAt <= st.opts.taskTimeoutMs + 5 * MIN_MS) return
         if (await runningElsewhere($, record.agentId)) return
+        // Read both again: another instance may have finished the run since the log was read.
+        if (!(await $.store.get(key))) return
+        if (await launchEnded($, st, record)) return dropRecord($, record.agentId)
         out.push(await lostRun($, st, record, current))
       })
     }
