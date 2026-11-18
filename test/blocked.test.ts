@@ -137,7 +137,7 @@ const launch = async ($: any, w: any, over: Record<string, unknown> = {}) => {
 
 // The kit cannot return a spawned agent's id (core sets it), and its `$` has no engine ops to call the hooks with, so a
 // successful spawn is driven by calling the hooks directly over a small hand-made `$` (as dw6 in register.test.ts does).
-const driven = (completeAtSpawn = false) => {
+const driven = (completeAtSpawn = false, finalText = NOTES) => {
   const store = new Map<string, unknown>(Object.entries(CODEX_AHEAD))
   const files = new Map<string, string>()
   const toasts: string[] = []
@@ -162,7 +162,7 @@ const driven = (completeAtSpawn = false) => {
       run: async (argv: string[]) => ({ exitCode: argv[0] === 'codex' ? 0 : 1, stdout: '', stderr: '' }),
       spawn: async function* () {
         codexRuns++
-        yield ev({ type: 'item.completed', item: { type: 'agent_message', text: NOTES } })
+        yield ev({ type: 'item.completed', item: { type: 'agent_message', text: finalText } })
         return { code: 0, signal: null }
       },
     },
@@ -214,7 +214,7 @@ test('dw38_no_cooldown_a_reservation_through_the_redo_and_one_message_at_spawn_o
   const d = driven()
   const codexId = await d.launch()
   expect(d.submits).toEqual([
-    `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. ` +
+    `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. Codex's reason: "sandbox refused the write". ` +
     'Balancer is redoing it once on Claude as background agent redo-1; its report will come from that agent.',
   ])
   expect(d.claude()).toHaveLength(1)
@@ -233,7 +233,7 @@ for (const [id, over] of [['effort', { effort: 'high' }], ['mode', { mode: 'acce
     expect(d.st.cooldownUntil).toBe(0)
     expect(d.submits).toHaveLength(1)
     expect(d.submits[0]).toStartWith(
-      `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. It was not redone on Claude ` +
+      `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. Codex's reason: "sandbox refused the write". It was not redone on Claude ` +
       `because the call set ${id}, which a redo started by Balancer cannot carry. Delegate it again with the same description; that call will run on Claude.`,
     )
     expect(d.submits[0]).toContain(codex.partialBlock('blocked', NOTES))
@@ -248,7 +248,7 @@ for (const [id, over, why] of [['deny', { agentSpawnDeny: 'no agents' }, 'no age
     expect(claudeKeys(w)).toEqual([])
     expect(w.submits).toHaveLength(1)
     const head = `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed, and the Claude redo could not start (`
-    const tail = `). Delegate it again with the same description; that call will run on Claude.\n\n${codex.partialBlock('blocked', NOTES)}`
+    const tail = `). Codex's reason: "sandbox refused the write". Delegate it again with the same description; that call will run on Claude.\n\n${codex.partialBlock('blocked', NOTES)}`
     expect(w.submits[0]!.startsWith(head) && w.submits[0]!.endsWith(tail)).toBe(true)
     if (why) expect(w.submits[0]).toBe(head + why + tail)
     expect(logLines(w).map(l => l.reason)).toEqual(['codex-ahead'])
@@ -257,6 +257,42 @@ for (const [id, over, why] of [['deny', { agentSpawnDeny: 'no agents' }, 'no age
     expect(r2.result.status).toBe('completed') // no cooldown
   })
 }
+
+// ---------- dw61: the blocked message carries Codex's one-line reason; dw62: the log does not ----------
+
+const REASONS: [string, string, string | undefined][] = [
+  ['plain', 'BLOCKED: sandbox refused the write\nmore', 'sandbox refused the write'],
+  ['bold_marker', '**BLOCKED:** the plan reads the wrong JSON path', 'the plan reads the wrong JSON path'],
+  ['heading_and_blank_lines', '\n\n## Blocked:   two   spaces\tand a tab\n', 'two spaces and a tab'],
+  ['status_line_only', '# Report\nStatus: blocked\nDetails.', undefined],
+  ['empty_reason', 'BLOCKED:\nI stopped.', undefined],
+  ['not_blocked', 'All done.', undefined],
+]
+for (const [id, text, want] of REASONS) test(`dw61_blocked_reason_${id}`, () => expect(codex.blockedReason(text)).toBe(want))
+
+test('dw61_a_long_reason_is_cut_to_200_characters_by_code_point', () => {
+  const long = codex.blockedReason(`BLOCKED: ${'𐐀'.repeat(250)}`)!
+  expect([...long]).toHaveLength(201)
+  expect(long.endsWith('𐐀…')).toBe(true)
+  expect(codex.blockedReason(`BLOCKED: ${'a'.repeat(200)}`)).toBe('a'.repeat(200))
+})
+
+test('dw61_a_status_blocked_run_gets_the_message_without_a_reason', async () => {
+  const d = driven(false, '# Report\nStatus: blocked\nI stopped.')
+  const codexId = await d.launch()
+  expect(d.submits).toEqual([
+    `[balancer] Codex reported "DESC-SECRET-88" (${codexId}) blocked, nothing was changed. ` +
+    'Balancer is redoing it once on Claude as background agent redo-1; its report will come from that agent.',
+  ])
+})
+
+test('dw62_the_reason_is_not_in_the_decision_log_or_the_store', async ($, on) => {
+  const w = world(on, CODEX_AHEAD, { finalText: 'BLOCKED: REASON-SECRET-55 refused\nnotes', agentSpawnDeny: 'no agents' } as any)
+  await launch($, w)
+  expect(w.submits[0]).toContain('Codex\'s reason: "REASON-SECRET-55 refused".')
+  expect(JSON.stringify(logLines(w))).not.toContain('REASON-SECRET-55')
+  expect(JSON.stringify([...w.store.values()])).not.toContain('REASON-SECRET-55')
+})
 
 test('dw34_background_blocked_with_files_changed_delivers_the_failure_text_and_does_not_spawn', async ($, on) => {
   const w = world(on, CODEX_AHEAD, { finalText: NOTES, git: ['', ' M a.py'] })

@@ -21,6 +21,16 @@ export function isBlocked(finalMessage: string): boolean {
   return /^blocked\s*:/i.test(head[0] ?? '') || head.some(l => /^status\s*[:—–-]\s*blocked\b/i.test(l))
 }
 
+/** Codex's one-line reason from a `BLOCKED:` first line, cut to 200 characters; none for a `Status: blocked` match. */
+export function blockedReason(finalMessage: string): string | undefined {
+  const first = finalMessage.split('\n').find(l => l.trim() !== '')?.replace(/[*_`]/g, '').replace(/^[#>\-\s]+/, '') ?? ''
+  const m = /^blocked\s*:(.*)$/i.exec(first)
+  const reason = m?.[1]!.replace(/\s+/g, ' ').trim()
+  if (!reason) return undefined
+  const chars = [...reason]
+  return chars.length > 200 ? `${chars.slice(0, 200).join('')}…` : reason
+}
+
 export const PROMPT_ARG_LIMIT_BYTES = 100 * 1024
 
 export type Sandbox = 'read-only' | 'workspace-write'

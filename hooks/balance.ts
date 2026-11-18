@@ -59,6 +59,11 @@ export function lastDecisions(text: string, max = RECENT_MAX): DecisionEntry[] {
   return out.slice(-max)
 }
 
+/** `<session> <t>` of each launch whose Codex run the log already gives an outcome other than `lost`: it ended. */
+export function endedLaunches(text: string): Set<string> {
+  return new Set(lastDecisions(text, Infinity).filter(d => d.outcome !== undefined && d.outcome !== 'lost').map(d => `${d.session} ${d.t}`))
+}
+
 export type BalanceArgs = { kind: 'show' } | { kind: 'set'; mode: Mode } | { kind: 'usage' }
 
 export function parseBalanceArgs(args: string): BalanceArgs {

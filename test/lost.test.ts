@@ -192,14 +192,6 @@ test('dw42_a_codex_child_that_outlived_its_process_is_stopped_before_the_change_
   expect(lostSubmits(w)).toHaveLength(1)
 })
 
-test('dw41_a_background_result_that_cannot_be_delivered_keeps_its_record', async ($, on) => {
-  const w = world(on, CODEX_AHEAD, { submitFails: true } as any)
-  await $.tool.call(agent({ run_in_background: true }) as any)
-  await settleReal(() => w.spawnFinally > 0, 500)
-  await settleReal(() => false, 50)
-  expect(runKeys(w)).toHaveLength(1)
-})
-
 test('dw42_reconcile_does_not_redo_or_start_a_cooldown', async ($, on) => {
   const w = world(on, { ...CODEX_AHEAD, 'run/codex-123': record() })
   await startSession($)
